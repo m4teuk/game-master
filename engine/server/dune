@@ -1,0 +1,3 @@
+(executables
+ (names simple_server server)
+ (libraries engine unix threads.posix))

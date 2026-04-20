@@ -1,0 +1,14 @@
+opam-version: "2.0"
+synopsis: "Runtime engine for the .game domain-specific language"
+description: """
+Loads a .game ruleset, type-checks it, and runs per-player game sessions.
+Exposes a small, text-oriented public API intended for an operating server
+to plug directly into its request/response loop.
+"""
+maintainer: ["game-master authors"]
+authors: ["game-master authors"]
+license: "Unlicense"
+depends: [
+  "ocaml" {>= "4.14"}
+  "dune" {>= "3.0"}
+]

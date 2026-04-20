@@ -1,0 +1,10 @@
+(library
+ (name engine)
+ (public_name engine)
+ (wrapped true)
+ (libraries core)
+ (private_modules
+   tc_ast tc_errors tc_resolver tc_pass_decls tc_expr tc_exhaustiveness
+   tc_pass_lets tc_pass_exprs))
+
+(include_subdirs unqualified)
