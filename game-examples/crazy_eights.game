@@ -1,0 +1,439 @@
+-- ============================================================
+-- Crazy Eights (2–7 players)
+--
+-- On your turn, play a card matching the active suit or the
+-- top-of-discard rank. 8s are wild and let you declare the
+-- next active suit. If you can't or won't play, Draw puts the
+-- top of the deck into your JustDrawn holding area; you then
+-- either Keep it (turn ends) or play it.
+--
+-- First to empty their hand wins. Play continues among the
+-- remaining players until only one is left; ranking is
+-- finish-order + last-standing.
+-- ============================================================
+
+-- ============================================================
+-- Types
+-- ============================================================
+
+type Suit = Clubs | Diamonds | Hearts | Spades
+
+-- rank: 2..10 standard, 11=J, 12=Q, 13=K, 14=A
+type Card = Card { suit: Suit, rank: Num }
+
+type Phase = ShouldPlay | JustDrawn
+
+type Action =
+  | Play       { card: Card }
+  | Play8      { card: Card, suit: Suit }
+  | Draw
+  | Keep
+  | PlayDrawn
+  | PlayDrawn8 { suit: Suit }
+
+-- Finish order, first-out first.
+type Outcome = Finished { order: List<PlayerId> }
+
+type Config = Config {
+  turn: PlayerId,
+  phase: Phase,
+  active_suit: Suit,         -- matching suit (overridden by 8-plays)
+  finished: List<PlayerId>   -- players who have emptied their hand, in order
+}
+
+type PlayerDict = PlayerDict {}      -- nothing per-player to track
+
+-- ============================================================
+-- Piles
+-- ============================================================
+
+pile Hand(owner: PlayerId) of Card
+  visibility = fn (state, viewer) -> if_eq(owner, viewer, SeeAll, SeeSize)
+
+-- Holds at most one card, the card the owner just drew and hasn't
+-- decided what to do with. Owner sees it; others see only size.
+pile JustDrawn(owner: PlayerId) of Card
+  visibility = fn (state, viewer) -> if_eq(owner, viewer, SeeAll, SeeSize)
+
+pile Deck    of Card visibility = public_size
+pile Discard of Card visibility = public
+
+-- ============================================================
+-- Small helpers
+-- ============================================================
+
+let suits = [Clubs, Diamonds, Hearts, Spades]
+let ranks = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+
+fn standard_deck() -> List<Card> =
+  flatmap(suits, fn (s) ->
+    map(ranks, fn (r) -> Card { suit: s, rank: r }))
+
+fn is_eight(c: Card) -> Flag =
+  match c { Card { rank, .. } ->
+    match compare(rank, 8) { EQ -> On; _ -> Off }
+  }
+
+-- Non-8 card matches if its suit == active_suit OR its rank == top rank.
+fn matches(card: Card, active_suit: Suit, top: Card) -> Flag =
+  match card { Card { suit: cs, rank: cr } ->
+    match top { Card { rank: tr, .. } ->
+      if_eq(cs, active_suit, On,
+        match compare(cr, tr) { EQ -> On; _ -> Off })
+    }
+  }
+
+fn hand_size(n: Num) -> Num =
+  match compare(n, 2) { EQ -> 7; _ -> 5 }
+
+-- Discard top is guaranteed non-empty after setup.
+fn discard_top_view(view: View) -> Card =
+  match view_of(view, Discard) {
+    Contents([t, ..]) -> t;
+    _ -> fatal("discard should be public and non-empty after setup")
+  }
+
+fn discard_top_state(state: State) -> Card =
+  match top_of(state, Discard) {
+    Ok(c)  -> c;
+    Err(_) -> fatal("discard should be non-empty after setup")
+  }
+
+-- Does `player` hold `card` in hand? Uses view; owner sees Contents.
+fn hand_contains(view: View, player: PlayerId, card: Card)
+  -> Result<Unit, Text> =
+  match view_of(view, Hand(player)) {
+    Contents(cards) ->
+      match member(cards, card) {
+        On  -> Ok(Unit);
+        Off -> Err("You do not hold that card")
+      };
+    _ -> fatal("own hand should be visible to owner")
+  }
+
+-- Walk the player cycle, skipping anyone already in `finished`.
+fn next_active(players: List<PlayerId>, current: PlayerId,
+               finished: List<PlayerId>) -> PlayerId =
+  let nxt = next_in_cycle(players, current) in
+  match member(finished, nxt) {
+    Off -> nxt;
+    On  -> next_active(players, nxt, finished)
+  }
+
+-- Config field mutators using record-update syntax.
+fn set_phase(state: State, p: Phase) -> State =
+  let cfg = config_of(state) in
+  with_config(state, Config { ..cfg, phase: p })
+
+fn set_suit(state: State, s: Suit) -> State =
+  let cfg = config_of(state) in
+  with_config(state, Config { ..cfg, active_suit: s })
+
+fn add_to_finished(state: State, p: PlayerId) -> State =
+  let cfg = config_of(state) in
+  match cfg { Config { finished, .. } ->
+    with_config(state, Config { ..cfg, finished: append(finished, [p]) })
+  }
+
+-- Move to the next active player; also resets phase to ShouldPlay.
+fn advance_turn(state: State) -> State =
+  let cfg = config_of(state) in
+  match cfg { Config { turn, finished, .. } ->
+    let next = next_active(players_of(state), turn, finished) in
+    with_config(state, Config { ..cfg, turn: next, phase: ShouldPlay })
+  }
+
+-- ============================================================
+-- Setup
+-- ============================================================
+
+fn setup(players: List<PlayerId>, options: Options, rng: RNG)
+  -> Result<State, Text> =
+  let n = length(players) in
+  match compare(n, 2) {
+    LT -> Err("Crazy Eights requires 2–7 players");
+    _ ->
+      match compare(n, 7) {
+        GT -> Err("Crazy Eights requires 2–7 players");
+        _ ->
+          match players {
+            [first, ..] ->
+              let size = hand_size(n) in
+              let deck = standard_deck() in
+              let shuffled = shuffle_list(rng, deck) in
+              let (dealt, remaining) = split_at(shuffled, n * size) in
+              let cfg_stub = Config {
+                turn: first, phase: ShouldPlay,
+                active_suit: Clubs,                -- placeholder; fixed below
+                finished: []
+              } in
+              let s0 = new_state(cfg_stub) in
+              let s1 = deal_hands(s0, players, dealt, size) in
+              let s2 = init_pile(s1, Deck, remaining) in
+              let s3 = place_initial_discard(s2) in
+              let initial = discard_top_state(s3) in
+              let s4 = match initial { Card { suit, .. } -> set_suit(s3, suit) } in
+              Ok(s4);
+            [] -> fatal("validated n >= 2 above")
+          }
+      }
+  }
+
+fn deal_hands(state: State, players: List<PlayerId>,
+              cards: List<Card>, size: Num) -> State =
+  match players {
+    [] -> state;
+    [p, ..rest] ->
+      let (hand, more) = split_at(cards, size) in
+      let s1 = init_pile(state, Hand(p), hand) in
+      deal_hands(s1, rest, more, size)
+  }
+
+-- Flip top of deck onto discard. If it's an 8, recurse — the 8 ends up
+-- buried under whichever non-8 eventually lands on top.
+fn place_initial_discard(state: State) -> State =
+  let s1 = move_top(state, from=Deck, to=Discard) in
+  match top_of(s1, Discard) {
+    Err(_) -> fatal("deck ran out during initial placement");
+    Ok(c)  ->
+      match is_eight(c) {
+        On  -> place_initial_discard(s1);
+        Off -> s1
+      }
+  }
+
+-- ============================================================
+-- Validate
+-- ============================================================
+
+fn validate(view: View, player: PlayerId, action: Action)
+  -> Result<Unit, Text> =
+  let cfg = view_config(view) in
+  match cfg { Config { turn, phase, active_suit, .. } ->
+    match if_eq(player, turn, On, Off) {
+      Off -> Err("It is not your turn");
+      On  ->
+        match action {
+          Play { card }            -> validate_play(view, player, phase, active_suit, card);
+          Play8 { card, .. }       -> validate_play8(view, player, phase, card);
+          Draw                     -> validate_draw(view, phase);
+          Keep                     -> validate_keep(phase);
+          PlayDrawn                -> validate_play_drawn(view, player, phase, active_suit);
+          PlayDrawn8 { .. }        -> validate_play_drawn8(view, player, phase)
+        }
+    }
+  }
+
+fn validate_play(view: View, player: PlayerId, phase: Phase,
+                 active_suit: Suit, card: Card) -> Result<Unit, Text> =
+  match phase {
+    JustDrawn -> Err("You already drew; play the drawn card or Keep it");
+    ShouldPlay ->
+      match is_eight(card) {
+        On  -> Err("That is an 8; use Play8 to declare a suit");
+        Off ->
+          match hand_contains(view, player, card) {
+            Err(m) -> Err(m);
+            Ok(_)  ->
+              match matches(card, active_suit, discard_top_view(view)) {
+                On  -> Ok(Unit);
+                Off -> Err("That card doesn't match the active suit or top rank")
+              }
+          }
+      }
+  }
+
+fn validate_play8(view: View, player: PlayerId, phase: Phase, card: Card)
+  -> Result<Unit, Text> =
+  match phase {
+    JustDrawn -> Err("You already drew; play the drawn card or Keep it");
+    ShouldPlay ->
+      match is_eight(card) {
+        Off -> Err("That card is not an 8; use Play instead");
+        On  -> hand_contains(view, player, card)
+      }
+  }
+
+-- Draw is valid in ShouldPlay. Deck must be non-empty OR discard must
+-- have at least 2 cards (so refill can bring the deck back).
+fn validate_draw(view: View, phase: Phase) -> Result<Unit, Text> =
+  match phase {
+    JustDrawn -> Err("You already drew this turn");
+    ShouldPlay ->
+      match visible_size_of(view, Deck) {
+        Err(_) -> fatal("deck size should be visible");
+        Ok(ds) ->
+          match compare(ds, 0) {
+            GT -> Ok(Unit);
+            _  ->
+              match view_of(view, Discard) {
+                Contents(cs) ->
+                  match compare(length(cs), 2) {
+                    LT -> Err("Deadlock: deck is empty and discard has no refill");
+                    _  -> Ok(Unit)
+                  };
+                _ -> fatal("discard should be public")
+              }
+          }
+      }
+  }
+
+fn validate_keep(phase: Phase) -> Result<Unit, Text> =
+  match phase {
+    JustDrawn  -> Ok(Unit);
+    ShouldPlay -> Err("You have not drawn anything to keep")
+  }
+
+fn validate_play_drawn(view: View, player: PlayerId, phase: Phase,
+                       active_suit: Suit) -> Result<Unit, Text> =
+  match phase {
+    ShouldPlay -> Err("You have not drawn anything yet");
+    JustDrawn  ->
+      match view_of(view, JustDrawn(player)) {
+        Contents([c]) ->
+          match is_eight(c) {
+            On  -> Err("The drawn card is an 8; use PlayDrawn8");
+            Off ->
+              match matches(c, active_suit, discard_top_view(view)) {
+                On  -> Ok(Unit);
+                Off -> Err("The drawn card doesn't match; you must Keep it")
+              }
+          };
+        _ -> fatal("JustDrawn should have exactly one card for owner in this phase")
+      }
+  }
+
+fn validate_play_drawn8(view: View, player: PlayerId, phase: Phase)
+  -> Result<Unit, Text> =
+  match phase {
+    ShouldPlay -> Err("You have not drawn anything yet");
+    JustDrawn  ->
+      match view_of(view, JustDrawn(player)) {
+        Contents([c]) ->
+          match is_eight(c) {
+            On  -> Ok(Unit);
+            Off -> Err("The drawn card is not an 8; use PlayDrawn")
+          };
+        _ -> fatal("JustDrawn should have exactly one card for owner in this phase")
+      }
+  }
+
+-- ============================================================
+-- Apply
+-- ============================================================
+
+fn apply(state: State, rng: RNG, action: Action, player: PlayerId) -> State =
+  match action {
+    Play { card }          -> do_play(state, Hand(player),
+                                      card, suit_of(card), player);
+    Play8 { card, suit }   -> do_play(state, Hand(player),
+                                      card, suit, player);
+    Draw                   -> apply_draw(state, rng, player);
+    Keep                   -> apply_keep(state, player);
+    PlayDrawn              -> apply_play_drawn(state, player);
+    PlayDrawn8 { suit }    -> apply_play_drawn8(state, suit, player)
+  }
+
+fn suit_of(c: Card) -> Suit =
+  match c { Card { suit, .. } -> suit }
+
+-- Move `card` from `from` to discard, set active_suit, maybe finish,
+-- then advance the turn.
+fn do_play(state: State, from: PileRef<Card>, card: Card, new_suit: Suit,
+           player: PlayerId) -> State =
+  let s1 = move_card(state, from=from, to=Discard, card=card) in
+  let s2 = set_suit(s1, new_suit) in
+  let s3 =
+    match cards_in(s2, Hand(player)) {
+      [] -> add_to_finished(s2, player);
+      _  -> s2
+    } in
+  advance_turn(s3)
+
+-- Draw top of deck to JustDrawn(player). If deck is empty, refill from
+-- discard first. Turn unchanged; phase becomes JustDrawn.
+fn apply_draw(state: State, rng: RNG, player: PlayerId) -> State =
+  let s1 =
+    match top_of(state, Deck) {
+      Ok(_)  -> state;
+      Err(_) -> refill_deck(state, rng)
+    } in
+  let s2 = move_top(s1, from=Deck, to=JustDrawn(player)) in
+  set_phase(s2, JustDrawn)
+
+-- Take all-but-top from discard, shuffle, make it the new deck.
+fn refill_deck(state: State, rng: RNG) -> State =
+  match cards_in(state, Discard) {
+    []           -> fatal("cannot refill: discard empty");
+    [_]          -> fatal("cannot refill: only top card in discard");
+    [_top, ..rest] ->
+      let temp = temp_pile() in
+      let s1 = fold(rest, state, fn (s, c) ->
+        move_card(s, from=Discard, to=temp, card=c)) in
+      let s2 = shuffle(s1, rng, temp) in
+      move_all(s2, from=temp, to=Deck)
+  }
+
+fn apply_keep(state: State, player: PlayerId) -> State =
+  let s1 = move_top(state, from=JustDrawn(player), to=Hand(player)) in
+  advance_turn(s1)
+
+fn apply_play_drawn(state: State, player: PlayerId) -> State =
+  match top_of(state, JustDrawn(player)) {
+    Err(_) -> fatal("JustDrawn should have a card in this phase");
+    Ok(c)  -> do_play(state, JustDrawn(player), c, suit_of(c), player)
+  }
+
+fn apply_play_drawn8(state: State, suit: Suit, player: PlayerId) -> State =
+  match top_of(state, JustDrawn(player)) {
+    Err(_) -> fatal("JustDrawn should have a card in this phase");
+    Ok(c)  -> do_play(state, JustDrawn(player), c, suit, player)
+  }
+
+-- ============================================================
+-- Terminal
+-- ============================================================
+
+-- Game ends when only one player has not yet finished.
+-- Outcome order: finishers in finish-order, then the last-standing player.
+fn terminal(state: State) -> GameStatus<Outcome> =
+  let cfg = config_of(state) in
+  let players = players_of(state) in
+  match cfg { Config { finished, .. } ->
+    let total = length(players) in
+    let done  = length(finished) in
+    match compare(done, total - 1) {
+      EQ ->
+        let last = find_unfinished(players, finished) in
+        Ended(Finished { order: append(finished, [last]) });
+      _  -> Ongoing
+    }
+  }
+
+fn find_unfinished(players: List<PlayerId>, finished: List<PlayerId>)
+  -> PlayerId =
+  match players {
+    [] -> fatal("terminal invariant: one player must be unfinished");
+    [p, ..rest] ->
+      match member(finished, p) {
+        On  -> find_unfinished(rest, finished);
+        Off -> p
+      }
+  }
+
+-- ============================================================
+-- Text I/O
+-- ============================================================
+
+fn action_to_text(action: Action, player: PlayerId) -> Text =
+  builtin_action_to_text(action, player)
+
+fn text_to_action(input: Text, view: View, player: PlayerId)
+  -> Result<Action, Text> =
+  builtin_text_to_action(input, view, player)
+
+fn view_to_text(view: View, player: PlayerId) -> Text =
+  builtin_view_to_text(view, player)
+
+fn outcome_to_text(outcome: Outcome, player: PlayerId) -> Text =
+  builtin_outcome_to_text(outcome, player)

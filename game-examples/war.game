@@ -1,0 +1,266 @@
+-- ============================================================
+-- War — a 2-player luck-based card game
+--
+-- Each player has a face-down deck. Each round, both players
+-- play their top card; higher rank wins both cards, which go
+-- (shuffled) to the bottom of the winner's deck. Ties send more
+-- cards out and resolve when ranks differ.
+--
+-- Actions are kept explicit (Play / Take) to exercise the
+-- engine's mechanics rather than baking resolution into apply.
+-- ============================================================
+
+-- ============================================================
+-- Types
+-- ============================================================
+
+type Suit = Clubs | Diamonds | Hearts | Spades
+
+-- Rank is Num: 2..10 standard, 11=J, 12=Q, 13=K, 14=A (ace high).
+type Card = Card { suit: Suit, rank: Num }
+
+type Action = Play | Take
+
+type Outcome = Winner { player: PlayerId } | Draw
+
+type Config = Config { p1: PlayerId, p2: PlayerId }
+
+type PlayerDict = PlayerDict {}    -- empty; no per-player public state in War
+
+-- ============================================================
+-- Piles
+-- ============================================================
+
+-- A player's draw pile. No one peeks, not even the owner.
+pile Deck(owner: PlayerId) of Card visibility = public_size
+
+-- Where a player puts their card during a round, before the
+-- simultaneous reveal. The owner sees what they played; the
+-- opponent only sees that something was played.
+pile Played(owner: PlayerId) of Card
+  visibility = fn (state, viewer) -> if_eq(owner, viewer, SeeAll, SeeSize)
+
+-- The face-up battle area. Both active piles are fully public.
+pile Active(owner: PlayerId) of Card visibility = public
+
+-- ============================================================
+-- Helpers
+-- ============================================================
+
+let suits = [Clubs, Diamonds, Hearts, Spades]
+let ranks = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+
+fn standard_deck() -> List<Card> =
+  flatmap(suits, fn (s) ->
+    map(ranks, fn (r) -> Card { suit: s, rank: r }))
+
+-- ============================================================
+-- Setup
+-- ============================================================
+
+fn setup(players: List<PlayerId>, options: Options, rng: RNG)
+  -> Result<State, Text> =
+  match players {
+    [p1, p2] ->
+      let cfg = Config { p1: p1, p2: p2 } in
+      let deck = standard_deck() in
+      let shuffled = shuffle_list(rng, deck) in
+      let (h1, h2) = split_at(shuffled, 26) in
+      let s0 = new_state(cfg) in
+      let s1 = init_pile(s0, Deck(p1), h1) in
+      let s2 = init_pile(s1, Deck(p2), h2) in
+      Ok(s2);
+    _ ->
+      Err("War requires exactly 2 players")
+  }
+
+-- ============================================================
+-- Validation helpers
+-- ============================================================
+
+-- "Active is empty or at a draw" — both empty, or both non-empty
+-- with equal top ranks.
+fn active_is_open(view: View, cfg: Config) -> Result<Unit, Text> =
+  match cfg { Config { p1, p2 } ->
+    let a1 = view_of(view, Active(p1)) in
+    let a2 = view_of(view, Active(p2)) in
+    match (a1, a2) {
+      (Contents([]), Contents([])) ->
+        Ok(Unit);
+      (Contents([c1, ..]), Contents([c2, ..])) ->
+        match c1 { Card { rank: r1, .. } ->
+          match c2 { Card { rank: r2, .. } ->
+            match compare(r1, r2) {
+              EQ -> Ok(Unit);
+              _  -> Err("Active has a winner; take it first")
+            }
+          }
+        };
+      _ ->
+        fatal("active piles should always be fully visible")
+    }
+  }
+
+-- ============================================================
+-- Validate
+-- ============================================================
+
+fn validate(view: View, player: PlayerId, action: Action)
+  -> Result<Unit, Text> =
+  let cfg = view_config(view) in
+  match action {
+
+    Play ->
+      -- Player's own played pile must be empty.
+      let my_played = view_of(view, Played(player)) in
+      match my_played {
+        Contents([]) ->
+          -- Player's deck must be non-empty.
+          let deck_size = visible_size_of(view, Deck(player)) in
+          match deck_size {
+            Ok(n) ->
+              match compare(n, 0) {
+                EQ -> Err("Your deck is empty");
+                _  -> active_is_open(view, cfg)
+              };
+            Err(_) ->
+              fatal("own deck size should always be visible")
+          };
+        Contents(_) ->
+          Err("You have already played this round");
+        _ ->
+          fatal("own played pile should be visible to owner")
+      };
+
+    Take ->
+      match cfg { Config { p1, p2 } ->
+        let a1 = view_of(view, Active(p1)) in
+        let a2 = view_of(view, Active(p2)) in
+        match (a1, a2) {
+          (Contents([c1, ..]), Contents([c2, ..])) ->
+            match c1 { Card { rank: r1, .. } ->
+              match c2 { Card { rank: r2, .. } ->
+                match compare(r1, r2) {
+                  EQ -> Err("Active is at a draw; play another card");
+                  GT -> if_eq(player, p1, Ok(Unit),
+                              Err("Only the winner may take"));
+                  LT -> if_eq(player, p2, Ok(Unit),
+                              Err("Only the winner may take"))
+                }
+              }
+            };
+          _ ->
+            Err("Both active piles must be non-empty to take")
+        }
+      }
+  }
+
+-- ============================================================
+-- Apply
+-- ============================================================
+
+fn apply(state: State, rng: RNG, action: Action, player: PlayerId)
+  -> State =
+  let cfg = config_of(state) in
+  match action {
+    Play -> apply_play(state, cfg, player);
+    Take -> apply_take(state, rng, cfg, player)
+  }
+
+-- Play: move top of player's deck to their played pile.
+-- If both players are now committed, auto-reveal: move both
+-- played cards to their respective active piles.
+fn apply_play(state: State, cfg: Config, player: PlayerId) -> State =
+  let s1 = move_top(state, from=Deck(player), to=Played(player)) in
+  match cfg { Config { p1, p2 } ->
+    let n1 = size_of(s1, Played(p1)) in
+    let n2 = size_of(s1, Played(p2)) in
+    match (compare(n1, 0), compare(n2, 0)) {
+      (GT, GT) ->
+        let s2 = move_top(s1, from=Played(p1), to=Active(p1)) in
+        let s3 = move_top(s2, from=Played(p2), to=Active(p2)) in
+        s3;
+      _ ->
+        s1
+    }
+  }
+
+-- Take: combine both active piles into a temp pile, shuffle,
+-- and move the result to the bottom of the winner's deck.
+fn apply_take(state: State, rng: RNG, cfg: Config, player: PlayerId)
+  -> State =
+  match cfg { Config { p1, p2 } ->
+    let temp = temp_pile() in
+    let s1 = move_all(state, from=Active(p1), to=temp) in
+    let s2 = move_all(s1, from=Active(p2), to=temp) in
+    let s3 = shuffle(s2, rng, temp) in
+    let s4 = move_all_to_bottom(s3, from=temp, to=Deck(player)) in
+    s4
+  }
+
+-- ============================================================
+-- Terminal
+-- ============================================================
+
+-- A player loses when active is empty-or-drawn AND they have
+-- no cards left in either deck or played. Both at once = Draw.
+fn terminal(state: State) -> GameStatus<Outcome> =
+  let cfg = config_of(state) in
+  match cfg { Config { p1, p2 } ->
+    match active_settled(state, p1, p2) {
+      Off -> Ongoing;
+      On  ->
+        let p1_out = player_is_out(state, p1) in
+        let p2_out = player_is_out(state, p2) in
+        match (p1_out, p2_out) {
+          (On, On)   -> Ended(Draw);
+          (On, Off)  -> Ended(Winner { player: p2 });
+          (Off, On)  -> Ended(Winner { player: p1 });
+          (Off, Off) -> Ongoing
+        }
+    }
+  }
+
+-- `On` if active is settled (both empty, or top ranks equal), `Off` otherwise.
+fn active_settled(state: State, p1: PlayerId, p2: PlayerId) -> Flag =
+  let a1 = cards_in(state, Active(p1)) in
+  let a2 = cards_in(state, Active(p2)) in
+  match (a1, a2) {
+    ([], []) -> On;
+    ([c1, ..], [c2, ..]) ->
+      match c1 { Card { rank: r1, .. } ->
+        match c2 { Card { rank: r2, .. } ->
+          match compare(r1, r2) {
+            EQ -> On;
+            _  -> Off
+          }
+        }
+      };
+    _ -> Off   -- exactly one empty: someone can still take, not settled
+  }
+
+fn player_is_out(state: State, p: PlayerId) -> Flag =
+  let d = cards_in(state, Deck(p)) in
+  let pl = cards_in(state, Played(p)) in
+  match (d, pl) {
+    ([], []) -> On;
+    _        -> Off
+  }
+
+-- ============================================================
+-- Text I/O
+-- ============================================================
+-- War doesn't need custom formatting; delegate to built-ins.
+
+fn action_to_text(action: Action, player: PlayerId) -> Text =
+  builtin_action_to_text(action, player)
+
+fn text_to_action(input: Text, view: View, player: PlayerId)
+  -> Result<Action, Text> =
+  builtin_text_to_action(input, view, player)
+
+fn view_to_text(view: View, player: PlayerId) -> Text =
+  builtin_view_to_text(view, player)
+
+fn outcome_to_text(outcome: Outcome, player: PlayerId) -> Text =
+  builtin_outcome_to_text(outcome, player)

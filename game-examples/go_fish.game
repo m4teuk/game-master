@@ -1,0 +1,410 @@
+-- ============================================================
+-- Go Fish (2–6 players)
+--
+-- Players take turns asking opponents for a rank. The target
+-- must hand over all cards of that rank (Give) or say "go fish"
+-- if they have none; the asker then draws from the deck. A
+-- player who collects all four cards of a rank forms a book.
+-- Game ends when all 13 books are collected.
+-- ============================================================
+
+-- ============================================================
+-- Types
+-- ============================================================
+
+type Suit = Clubs | Diamonds | Hearts | Spades
+
+-- rank: 2..10 standard, 11=J, 12=Q, 13=K, 14=A
+type Card = Card { suit: Suit, rank: Num }
+
+-- Global state machine:
+--   ShouldAsk                      -- current turn is choosing someone to ask
+--   Asked { target, rank }         -- target must Give or GoFish
+--   ShouldDraw { last_rank }       -- asker was told "go fish"; must draw or pass
+type Phase =
+  | ShouldAsk
+  | Asked     { target: PlayerId, rank: Num }
+  | ShouldDraw { last_rank: Num }
+
+type Action =
+  | AskFor { target: PlayerId, rank: Num }
+  | Give
+  | GoFish
+  | Draw
+  | Pass
+
+type Outcome =
+  | Winner { player: PlayerId }
+  | Tie    { players: List<PlayerId> }
+
+type Config = Config {
+  turn: PlayerId,        -- whose round it is (the asker, always)
+  phase: Phase
+}
+
+type PlayerDict = PlayerDict { completed: Num }
+
+-- ============================================================
+-- Piles
+-- ============================================================
+
+-- A player's hand. Owner sees the cards; others see only size.
+pile Hand(owner: PlayerId) of Card
+  visibility = fn (state, viewer) -> if_eq(owner, viewer, SeeAll, SeeSize)
+
+-- A completed book of four cards of one rank, owned by a player.
+-- Empty for most (owner, rank) pairs; populated when a book forms.
+-- Fully public once a book exists.
+pile Book(owner: PlayerId, rank: Num) of Card visibility = public
+
+-- The shared draw pile. Size is visible; contents are not.
+pile Deck of Card visibility = public_size
+
+-- ============================================================
+-- Small helpers
+-- ============================================================
+
+let suits = [Clubs, Diamonds, Hearts, Spades]
+let ranks = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+
+fn standard_deck() -> List<Card> =
+  flatmap(suits, fn (s) ->
+    map(ranks, fn (r) -> Card { suit: s, rank: r }))
+
+fn has_rank(c: Card, r: Num) -> Flag =
+  match c { Card { rank, .. } ->
+    match compare(rank, r) { EQ -> On; _ -> Off }
+  }
+
+fn cards_of_rank(cards: List<Card>, r: Num) -> List<Card> =
+  filter(cards, fn (c) -> has_rank(c, r))
+
+-- Default hand size: 7 for 2 players, 5 for 3–6.
+fn hand_size(n: Num) -> Num =
+  match compare(n, 2) { EQ -> 7; _ -> 5 }
+
+-- Mutate just the phase in the config.
+fn set_phase(state: State, p: Phase) -> State =
+  let cfg = config_of(state) in
+  with_config(state, Config { ..cfg, phase: p })
+
+-- Advance turn to the next player in cycle and reset phase to ShouldAsk.
+fn advance_turn(state: State) -> State =
+  let cfg = config_of(state) in
+  match cfg { Config { turn, .. } ->
+    let next = next_in_cycle(players_of(state), turn) in
+    with_config(state, Config { ..cfg, turn: next, phase: ShouldAsk })
+  }
+
+-- ============================================================
+-- Setup
+-- ============================================================
+
+fn setup(players: List<PlayerId>, options: Options, rng: RNG)
+  -> Result<State, Text> =
+  let n = length(players) in
+  match compare(n, 2) {
+    LT -> Err("Go Fish requires 2–6 players");
+    _ ->
+      match compare(n, 6) {
+        GT -> Err("Go Fish requires 2–6 players");
+        _ ->
+          match players {
+            [first, ..] ->
+              let size = hand_size(n) in
+              let deck = standard_deck() in
+              let shuffled = shuffle_list(rng, deck) in
+              let (dealt, remaining) = split_at(shuffled, n * size) in
+              let cfg = Config {
+                turn: first,
+                phase: ShouldAsk
+              } in
+              let s0 = new_state(cfg) in
+              let s1 = deal_hands(s0, players, dealt, size) in
+              let s2 = init_pile(s1, Deck, remaining) in
+              Ok(s2);
+            [] -> fatal("validated n >= 2 above")
+          }
+      }
+  }
+
+fn deal_hands(state: State, players: List<PlayerId>,
+              cards: List<Card>, size: Num) -> State =
+  match players {
+    [] -> state;
+    [p, ..rest] ->
+      let (hand, more) = split_at(cards, size) in
+      let s1 = init_pile(state, Hand(p), hand) in
+      deal_hands(s1, rest, more, size)
+  }
+
+-- ============================================================
+-- Validation helpers
+-- ============================================================
+
+-- Is `t` a player other than `self`, and in the game?
+fn valid_target(view: View, self: PlayerId, t: PlayerId) -> Result<Unit, Text> =
+  match if_eq(self, t, On, Off) {
+    On  -> Err("You cannot ask yourself");
+    Off ->
+      match member(players_of_view(view), t) {
+        On  -> Ok(Unit);
+        Off -> Err("Target is not in this game")
+      }
+  }
+
+-- ============================================================
+-- Validate
+-- ============================================================
+
+fn validate(view: View, player: PlayerId, action: Action)
+  -> Result<Unit, Text> =
+  let cfg = view_config(view) in
+  match cfg { Config { turn, phase } ->
+    match action {
+
+      AskFor { target, rank } ->
+        match phase {
+          ShouldAsk ->
+            match if_eq(player, turn, On, Off) {
+              Off -> Err("It is not your turn");
+              On  ->
+                match valid_target(view, player, target) {
+                  Err(m) -> Err(m);
+                  Ok(_) ->
+                    -- must hold at least one card of the asked rank
+                    let my_hand = view_of(view, Hand(player)) in
+                    match my_hand {
+                      Contents(cards) ->
+                        match any(cards, fn (c) -> has_rank(c, rank)) {
+                          On  -> Ok(Unit);
+                          Off -> Err("You must hold at least one card of that rank")
+                        };
+                      _ -> fatal("own hand should be visible to owner")
+                    }
+                }
+            };
+          _ -> Err("Not in an asking phase")
+        };
+
+      Give ->
+        match phase {
+          Asked { target, rank } ->
+            match if_eq(player, target, On, Off) {
+              Off -> Err("You are not the asked player");
+              On  ->
+                let my_hand = view_of(view, Hand(player)) in
+                match my_hand {
+                  Contents(cards) ->
+                    match any(cards, fn (c) -> has_rank(c, rank)) {
+                      On  -> Ok(Unit);
+                      Off -> Err("You have none of that rank; say GoFish instead")
+                    };
+                  _ -> fatal("own hand should be visible to owner")
+                }
+            };
+          _ -> Err("There is no pending ask")
+        };
+
+      GoFish ->
+        match phase {
+          Asked { target, rank } ->
+            match if_eq(player, target, On, Off) {
+              Off -> Err("You are not the asked player");
+              On  ->
+                let my_hand = view_of(view, Hand(player)) in
+                match my_hand {
+                  Contents(cards) ->
+                    match any(cards, fn (c) -> has_rank(c, rank)) {
+                      On  -> Err("You hold that rank; you must Give");
+                      Off -> Ok(Unit)
+                    };
+                  _ -> fatal("own hand should be visible to owner")
+                }
+            };
+          _ -> Err("There is no pending ask")
+        };
+
+      Draw -> validate_draw_or_pass(view, cfg, player, On);
+      Pass -> validate_draw_or_pass(view, cfg, player, Off)
+    }
+  }
+
+-- Shared gate for Draw (expect_draw = On) and Pass (expect_draw = Off).
+-- Both are valid in the same situations; they differ only in whether
+-- the deck is non-empty (Draw) or empty (Pass).
+fn validate_draw_or_pass(view: View, cfg: Config, player: PlayerId,
+                          expect_draw: Flag) -> Result<Unit, Text> =
+  match cfg { Config { turn, phase, .. } ->
+    match if_eq(player, turn, On, Off) {
+      Off -> Err("It is not your turn");
+      On  ->
+        match allowed_draw_phase(view, player, phase) {
+          Err(m) -> Err(m);
+          Ok(_) ->
+            let deck_size = visible_size_of(view, Deck) in
+            match deck_size {
+              Err(_) -> fatal("Deck size should be visible");
+              Ok(n) ->
+                match compare(n, 0) {
+                  EQ ->
+                    match expect_draw {
+                      On  -> Err("Deck is empty; use Pass");
+                      Off -> Ok(Unit)
+                    };
+                  _ ->
+                    match expect_draw {
+                      On  -> Ok(Unit);
+                      Off -> Err("Deck is not empty; use Draw")
+                    }
+                }
+            }
+        }
+    }
+  }
+
+-- Draw/Pass is allowed in ShouldDraw, or in ShouldAsk if the player's hand is empty.
+fn allowed_draw_phase(view: View, player: PlayerId, phase: Phase)
+  -> Result<Unit, Text> =
+  match phase {
+    ShouldDraw { .. } -> Ok(Unit);
+    ShouldAsk ->
+      let my_hand = view_of(view, Hand(player)) in
+      match my_hand {
+        Contents([]) -> Ok(Unit);
+        Contents(_)  -> Err("You still have cards; you must Ask");
+        _            -> fatal("own hand should be visible to owner")
+      };
+    Asked { .. } -> Err("There is a pending ask; respond first")
+  }
+
+-- ============================================================
+-- Apply
+-- ============================================================
+
+fn apply(state: State, rng: RNG, action: Action, player: PlayerId) -> State =
+  let cfg = config_of(state) in
+  match cfg { Config { turn, phase, .. } ->
+    match action {
+      AskFor { target, rank } -> apply_ask_for(state, target, rank);
+      Give                    -> apply_give(state, phase, turn);
+      GoFish                  -> apply_go_fish(state, phase);
+      Draw                    -> apply_draw(state, phase, turn);
+      Pass                    -> advance_turn(state)
+    }
+  }
+
+fn apply_ask_for(state: State, target: PlayerId, rank: Num) -> State =
+  set_phase(state, Asked { target: target, rank: rank })
+
+-- Target hands over all cards of `rank` to the asker (= current turn).
+-- Then check if asker formed a book. Turn unchanged; phase back to ShouldAsk.
+fn apply_give(state: State, phase: Phase, asker: PlayerId) -> State =
+  match phase {
+    Asked { target, rank } ->
+      let target_hand = cards_in(state, Hand(target)) in
+      let matching = cards_of_rank(target_hand, rank) in
+      let s1 = fold(matching, state, fn (s, c) ->
+        move_card(s, from=Hand(target), to=Hand(asker), card=c)) in
+      let s2 = check_for_book(s1, asker, rank) in
+      set_phase(s2, ShouldAsk);
+    _ -> fatal("apply_give in non-Asked phase")
+  }
+
+fn apply_go_fish(state: State, phase: Phase) -> State =
+  match phase {
+    Asked { rank, .. } ->
+      set_phase(state, ShouldDraw { last_rank: rank });
+    _ -> fatal("apply_go_fish in non-Asked phase")
+  }
+
+-- Draw top of deck to asker's hand. If in ShouldDraw(r) and drawn rank matches,
+-- asker keeps the turn; otherwise advance. Check for a book either way.
+fn apply_draw(state: State, phase: Phase, asker: PlayerId) -> State =
+  match top_of(state, Deck) {
+    Err(_) -> fatal("deck must be non-empty when draw is valid");
+    Ok(drawn) ->
+      let s1 = move_top(state, from=Deck, to=Hand(asker)) in
+      let drawn_rank = match drawn { Card { rank, .. } -> rank } in
+      let s2 = check_for_book(s1, asker, drawn_rank) in
+      match phase {
+        ShouldDraw { last_rank } ->
+          match compare(drawn_rank, last_rank) {
+            EQ -> set_phase(s2, ShouldAsk);         -- matched; keep turn
+            _  -> advance_turn(s2)                  -- missed; next player
+          };
+        ShouldAsk -> set_phase(s2, ShouldAsk);      -- empty-hand fallback; keep turn
+        _ -> fatal("apply_draw in invalid phase")
+      }
+  }
+
+-- If `player` now holds all four cards of `rank`, move them into Book(player, rank)
+-- and increment their completed counter.
+fn check_for_book(state: State, player: PlayerId, rank: Num) -> State =
+  let hand = cards_in(state, Hand(player)) in
+  let matches = cards_of_rank(hand, rank) in
+  match compare(length(matches), 4) {
+    EQ -> form_book(state, player, rank, matches);
+    _  -> state
+  }
+
+fn form_book(state: State, player: PlayerId, rank: Num, cards: List<Card>)
+  -> State =
+  let s1 = fold(cards, state, fn (s, c) ->
+    move_card(s, from=Hand(player), to=Book(player, rank), card=c)) in
+  update_player_dict(s1, player, fn (pd) ->
+    match pd { PlayerDict { completed } -> PlayerDict { completed: completed + 1 } })
+
+-- ============================================================
+-- Terminal
+-- ============================================================
+
+-- All 13 books collected across all players.
+fn terminal(state: State) -> GameStatus<Outcome> =
+  let players = players_of(state) in
+  let total = fold(players, 0, fn (acc, p) ->
+    match player_dict(state, p) {
+      PlayerDict { completed } -> acc + completed
+    }) in
+  match compare(total, 13) {
+    EQ -> Ended(compute_outcome(state, players));
+    _  -> Ongoing
+  }
+
+fn compute_outcome(state: State, players: List<PlayerId>) -> Outcome =
+  let scores = map(players, fn (p) ->
+    match player_dict(state, p) {
+      PlayerDict { completed } -> (p, completed)
+    }) in
+  let best = fold(scores, 0, fn (acc, pair) ->
+    match pair { (_, n) ->
+      match compare(n, acc) { GT -> n; _ -> acc }
+    }) in
+  let winners = filter(scores, fn (pair) ->
+    match pair { (_, n) ->
+      match compare(n, best) { EQ -> On; _ -> Off }
+    }) in
+  let winner_ids = map(winners, fn (pair) ->
+    match pair { (p, _) -> p }) in
+  match winner_ids {
+    [p]      -> Winner { player: p };
+    [_, _, ..] -> Tie { players: winner_ids };
+    [] -> fatal("at least one player must have max score")
+  }
+
+-- ============================================================
+-- Text I/O
+-- ============================================================
+
+fn action_to_text(action: Action, player: PlayerId) -> Text =
+  builtin_action_to_text(action, player)
+
+fn text_to_action(input: Text, view: View, player: PlayerId)
+  -> Result<Action, Text> =
+  builtin_text_to_action(input, view, player)
+
+fn view_to_text(view: View, player: PlayerId) -> Text =
+  builtin_view_to_text(view, player)
+
+fn outcome_to_text(outcome: Outcome, player: PlayerId) -> Text =
+  builtin_outcome_to_text(outcome, player)
