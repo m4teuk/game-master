@@ -343,13 +343,13 @@ let () =
   let addr = ref "0.0.0.0" in
   let port = ref 3301 in
   let timeout = ref 300 in
-  let folder = ref "./game-examples" in
+  let folder = ref "../game-examples" in
   let speclist = [
     "-a", Arg.Set_string addr, " address to bind (default 0.0.0.0)";
     "-p", Arg.Set_int port, " port (default 3301)";
     "-t", Arg.Set_int timeout, " connection timeout seconds (default 300)";
     "-f", Arg.Set_string folder,
-          " folder with prebuilt .game files (default ./game-examples)";
+          " folder with prebuilt .game files (default ../game-examples)";
   ] in
   Arg.parse speclist (fun _ -> usage ()) "server";
   if !timeout <= 0 || !folder = "" then usage ();
