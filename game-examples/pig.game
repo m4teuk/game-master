@@ -1,0 +1,197 @@
+-- ============================================================
+-- Pig (3–6 players)
+--
+-- Setup picks `n` distinct ranks from a standard deck (one per
+-- player), shuffles those 4·n cards, and deals 4 to each player.
+-- On your turn you Pass one card from your hand to the player on
+-- your left (the rest of the round happens on their turn).
+--
+-- The first player to hold `target_count` cards of one rank
+-- wins. (The classical version is "4 of a kind"; this engine
+-- exposes it as an option.) Initial deals can theoretically
+-- produce a winning hand — if you got lucky, just don't pass
+-- away your matching cards on your first turn.
+-- ============================================================
+
+-- ============================================================
+-- Types
+-- ============================================================
+
+type Suit = Clubs | Diamonds | Hearts | Spades
+
+-- rank: 2..10 standard, 11=J, 12=Q, 13=K, 14=A
+type Card = Card { suit: Suit, rank: Num }
+
+type Action = Pass { card: Card }
+
+type Outcome = Winner { player: PlayerId }
+
+type Config = Config { turn: PlayerId, target: Num }
+
+type PlayerDict = PlayerDict {}
+
+-- ============================================================
+-- Piles
+-- ============================================================
+
+pile Hand(owner: PlayerId) of Card
+  visibility = fn (state, viewer) -> if_eq(owner, viewer, SeeAll, SeeSize)
+
+-- ============================================================
+-- Options
+-- ============================================================
+
+options {
+  target_count: Num = 4
+}
+
+-- ============================================================
+-- Helpers
+-- ============================================================
+
+let suits = [Clubs, Diamonds, Hearts, Spades]
+let ranks = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+
+fn standard_deck() -> List<Card> =
+  flatmap(suits, fn (s) ->
+    map(ranks, fn (r) -> Card { suit: s, rank: r }))
+
+fn rank_of(c: Card) -> Num =
+  match c { Card { rank, .. } -> rank }
+
+fn has_rank(c: Card, r: Num) -> Flag =
+  match compare(rank_of(c), r) { EQ -> On; _ -> Off }
+
+fn count_rank(cards: List<Card>, r: Num) -> Num =
+  length(filter(cards, fn (c) -> has_rank(c, r)))
+
+-- Take the first `n` ranks; gives us `n` ranks worth (4·n cards) for `n` players.
+fn pick_n_ranks(n: Num) -> List<Num> =
+  let (taken, _) = split_at(ranks, n) in
+  taken
+
+fn cards_of_ranks(rs: List<Num>) -> List<Card> =
+  filter(standard_deck(), fn (c) -> member(rs, rank_of(c)))
+
+-- ============================================================
+-- Setup
+-- ============================================================
+
+fn setup(players: List<PlayerId>, options: Options, rng: RNG)
+  -> Result<State, Text> =
+  let n = length(players) in
+  match compare(n, 3) {
+    LT -> Err("Pig requires 3–6 players");
+    _ ->
+      match compare(n, 6) {
+        GT -> Err("Pig requires 3–6 players");
+        _ ->
+          match options { Options { target_count } ->
+            match compare(target_count, 2) {
+              LT -> Err("target_count must be at least 2");
+              _ ->
+                match compare(target_count, 4) {
+                  GT -> Err("target_count cannot exceed 4 (only 4 of each rank)");
+                  _ ->
+                    let chosen = pick_n_ranks(n) in
+                    let shuffled = shuffle_list(rng, cards_of_ranks(chosen)) in
+                    match players {
+                      [first, ..] ->
+                        let cfg = Config { turn: first, target: target_count } in
+                        let s0 = new_state(cfg) in
+                        let s1 = deal_hands(s0, players, shuffled) in
+                        Ok(s1);
+                      [] -> fatal("validated above")
+                    }
+                }
+            }
+          }
+      }
+  }
+
+-- Each player gets exactly 4 cards (deck size = 4·n by construction).
+fn deal_hands(state: State, players: List<PlayerId>,
+              cards: List<Card>) -> State =
+  match players {
+    [] -> state;
+    [p, ..rest] ->
+      let (hand, more) = split_at(cards, 4) in
+      let s1 = init_pile(state, Hand(p), hand) in
+      deal_hands(s1, rest, more)
+  }
+
+-- ============================================================
+-- Validate
+-- ============================================================
+
+fn validate(view: View, player: PlayerId, action: Action)
+  -> Result<Unit, Text> =
+  let cfg = view_config(view) in
+  match cfg { Config { turn, .. } ->
+    match action { Pass { card } ->
+      match if_eq(player, turn, On, Off) {
+        Off -> Err("It is not your turn");
+        On  ->
+          match view_of(view, Hand(player)) {
+            Contents(cards) ->
+              match member(cards, card) {
+                On  -> Ok(Unit);
+                Off -> Err("You do not hold that card")
+              };
+            _ -> fatal("own hand should be visible to owner")
+          }
+      }
+    }
+  }
+
+-- ============================================================
+-- Apply
+-- ============================================================
+
+fn apply(state: State, rng: RNG, action: Action, player: PlayerId) -> State =
+  match action { Pass { card } ->
+    let cfg = config_of(state) in
+    let nxt = next_in_cycle(players_of(state), player) in
+    let s1 = move_card(state, from=Hand(player), to=Hand(nxt), card=card) in
+    with_config(s1, Config { ..cfg, turn: nxt })
+  }
+
+-- ============================================================
+-- Terminal
+-- ============================================================
+
+fn terminal(state: State) -> GameStatus<Outcome> =
+  let cfg = config_of(state) in
+  match cfg { Config { target, .. } ->
+    let winners = filter(players_of(state), fn (p) ->
+      has_n_of_kind(state, p, target)) in
+    match winners {
+      [w, ..] -> Ended(Winner { player: w });
+      []      -> Ongoing
+    }
+  }
+
+fn has_n_of_kind(state: State, p: PlayerId, target: Num) -> Flag =
+  let cards = cards_in(state, Hand(p)) in
+  any(ranks, fn (r) ->
+    match compare(count_rank(cards, r), target) {
+      LT -> Off;
+      _  -> On
+    })
+
+-- ============================================================
+-- Text I/O — defaults
+-- ============================================================
+
+fn action_to_text(action: Action, player: PlayerId) -> Text =
+  builtin_action_to_text(action, player)
+
+fn text_to_action(input: Text, view: View, player: PlayerId)
+  -> Result<Action, Text> =
+  builtin_text_to_action(input, view, player)
+
+fn view_to_text(view: View, player: PlayerId) -> Text =
+  builtin_view_to_text(view, player)
+
+fn outcome_to_text(outcome: Outcome, player: PlayerId) -> Text =
+  builtin_outcome_to_text(outcome, player)

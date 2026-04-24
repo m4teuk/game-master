@@ -1,0 +1,276 @@
+-- ============================================================
+-- Old Maid (2–6 players)
+--
+-- Setup removes 3 of the 4 cards of `odd_card`'s rank from a
+-- standard deck, leaving one un-pairable "Old Maid". The
+-- remaining 49 cards are dealt round-robin to the players,
+-- and the engine auto-discards every initial pair from each
+-- hand (so 2-of-a-kind, 4-of-a-kind, etc. all settle out).
+--
+-- On your turn, you Draw a random card from the next
+-- still-in player's hand. The engine pairs and discards
+-- as needed, and the turn moves on. The game ends when only
+-- one player still holds cards — and that one card is the
+-- Old Maid.
+-- ============================================================
+
+-- ============================================================
+-- Types
+-- ============================================================
+
+type Suit = Clubs | Diamonds | Hearts | Spades
+
+-- rank: 2..10 standard, 11=J, 12=Q, 13=K, 14=A
+type Card = Card { suit: Suit, rank: Num }
+
+type Action = Draw
+
+-- Which face card is the unmatched one. Defaults to Queen
+-- (the classical "Old Maid"); user can pick any of these.
+type OddCard = Jack | Queen | King | Ace
+
+type Outcome = OldMaidLoser { player: PlayerId }
+
+type Config = Config {
+  turn: PlayerId,
+  odd_rank: Num     -- copied from options at setup
+}
+
+type PlayerDict = PlayerDict {}
+
+-- ============================================================
+-- Piles
+-- ============================================================
+
+pile Hand(owner: PlayerId) of Card
+  visibility = fn (state, viewer) -> if_eq(owner, viewer, SeeAll, SeeSize)
+
+pile Discard of Card visibility = public
+
+-- ============================================================
+-- Options
+-- ============================================================
+
+options {
+  odd_card: OddCard = Queen
+}
+
+-- ============================================================
+-- Helpers
+-- ============================================================
+
+let suits = [Clubs, Diamonds, Hearts, Spades]
+let ranks = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+
+fn standard_deck() -> List<Card> =
+  flatmap(suits, fn (s) ->
+    map(ranks, fn (r) -> Card { suit: s, rank: r }))
+
+fn rank_of(c: Card) -> Num =
+  match c { Card { rank, .. } -> rank }
+
+fn has_rank(c: Card, r: Num) -> Flag =
+  match compare(rank_of(c), r) { EQ -> On; _ -> Off }
+
+fn odd_rank_of(o: OddCard) -> Num =
+  match o {
+    Jack  -> 11;
+    Queen -> 12;
+    King  -> 13;
+    Ace   -> 14
+  }
+
+-- The cards we keep in the deck: every card not of `odd_rank`,
+-- plus the single Clubs card of `odd_rank` (the lonely Old Maid).
+fn build_deck(odd_rank: Num) -> List<Card> =
+  filter(standard_deck(), fn (c) ->
+    match has_rank(c, odd_rank) {
+      Off -> On;
+      On  ->
+        match c { Card { suit, .. } ->
+          match suit { Clubs -> On; _ -> Off }
+        }
+    })
+
+-- ============================================================
+-- Setup
+-- ============================================================
+
+fn setup(players: List<PlayerId>, options: Options, rng: RNG)
+  -> Result<State, Text> =
+  let n = length(players) in
+  match compare(n, 2) {
+    LT -> Err("Old Maid requires 2–6 players");
+    _ ->
+      match compare(n, 6) {
+        GT -> Err("Old Maid requires 2–6 players");
+        _ ->
+          match options { Options { odd_card } ->
+            let odd_rank = odd_rank_of(odd_card) in
+            let deck = shuffle_list(rng, build_deck(odd_rank)) in
+            let cfg_stub = Config {
+              turn: first_player(players),
+              odd_rank: odd_rank
+            } in
+            let s0 = new_state(cfg_stub) in
+            let s1 = deal_round_robin(s0, players, deck) in
+            let s2 = pair_off_all(s1, players) in
+            let s3 = with_config(s2, Config {
+              turn: pick_first_active(s2, players),
+              odd_rank: odd_rank
+            }) in
+            Ok(s3)
+          }
+      }
+  }
+
+fn first_player(players: List<PlayerId>) -> PlayerId =
+  match players {
+    [p, ..] -> p;
+    []      -> fatal("setup got empty roster")
+  }
+
+-- Round-robin: card 0 to player 0, card 1 to player 1, …, wrapping
+-- around. `temp_pile` is apply-only, so we can't stage cards there;
+-- instead we lean on `init_pile`'s "append to top if non-empty"
+-- behavior (stdlib §4) and feed one card at a time.
+fn deal_round_robin(state: State, players: List<PlayerId>,
+                    cards: List<Card>) -> State =
+  deal_loop(state, players, players, cards)
+
+fn deal_loop(state: State, all_players: List<PlayerId>,
+             current_cycle: List<PlayerId>, remaining: List<Card>) -> State =
+  match remaining {
+    [] -> state;
+    [c, ..rest] ->
+      match current_cycle {
+        [] -> deal_loop(state, all_players, all_players, remaining);
+        [p, ..more] ->
+          let s1 = init_pile(state, Hand(p), [c]) in
+          deal_loop(s1, all_players, more, rest)
+      }
+  }
+
+-- After dealing, fold over players and over each rank, discarding
+-- all complete pairs in each player's hand.
+fn pair_off_all(state: State, players: List<PlayerId>) -> State =
+  fold(players, state, fn (s, p) -> pair_off_hand(s, p))
+
+fn pair_off_hand(state: State, p: PlayerId) -> State =
+  fold(ranks, state, fn (s, r) -> pair_off_rank(s, p, r))
+
+fn pair_off_rank(state: State, p: PlayerId, r: Num) -> State =
+  let cards = filter(cards_in(state, Hand(p)), fn (c) -> has_rank(c, r)) in
+  let drop_n = (length(cards) / 2) * 2 in
+  let (to_discard, _) = split_at(cards, drop_n) in
+  fold(to_discard, state, fn (s, c) ->
+    move_card(s, from=Hand(p), to=Discard, card=c))
+
+fn pick_first_active(state: State, players: List<PlayerId>) -> PlayerId =
+  match players {
+    [] -> fatal("pick_first_active on empty roster");
+    [p, ..rest] ->
+      match compare(size_of(state, Hand(p)), 0) {
+        GT -> p;
+        _  ->
+          match rest {
+            [] -> p;   -- all empty; fall back to last (terminal will catch)
+            _  -> pick_first_active(state, rest)
+          }
+      }
+  }
+
+-- ============================================================
+-- Validate
+-- ============================================================
+
+fn validate(view: View, player: PlayerId, action: Action)
+  -> Result<Unit, Text> =
+  let cfg = view_config(view) in
+  match cfg { Config { turn, .. } ->
+    match if_eq(player, turn, On, Off) {
+      Off -> Err("It is not your turn");
+      On  ->
+        -- The acting player must still be in (have cards).
+        match visible_size_of(view, Hand(player)) {
+          Err(_) -> fatal("own hand size should be visible");
+          Ok(n)  ->
+            match compare(n, 0) {
+              EQ -> Err("Your hand is empty; you should have been skipped");
+              _  -> Ok(Unit)
+            }
+        }
+    }
+  }
+
+-- ============================================================
+-- Apply
+-- ============================================================
+
+fn apply(state: State, rng: RNG, action: Action, player: PlayerId) -> State =
+  let victim = next_active(state, players_of(state), player) in
+  let cards = cards_in(state, Hand(victim)) in
+  let n = length(cards) in
+  let idx = random_int(rng, 0, n - 1) in
+  match nth(cards, idx) {
+    Err(_) -> fatal("victim hand should be non-empty");
+    Ok(card) ->
+      let s1 = move_card(state, from=Hand(victim), to=Hand(player),
+                         card=card) in
+      let s2 = pair_off_rank(s1, player, rank_of(card)) in
+      let s3 = advance_turn(s2, player) in
+      s3
+  }
+
+-- Find the next still-in player (non-empty hand) after `from`,
+-- skipping anyone whose hand is empty.
+fn next_active(state: State, players: List<PlayerId>,
+               from: PlayerId) -> PlayerId =
+  let nxt = next_in_cycle(players, from) in
+  match compare(size_of(state, Hand(nxt)), 0) {
+    GT -> nxt;
+    _  ->
+      match if_eq(nxt, from, On, Off) {
+        On  -> from;   -- one full cycle, no one else has cards
+        Off -> next_active(state, players, nxt)
+      }
+  }
+
+fn advance_turn(state: State, current: PlayerId) -> State =
+  let cfg = config_of(state) in
+  match cfg { Config { odd_rank, .. } ->
+    let nxt = next_active(state, players_of(state), current) in
+    with_config(state, Config { turn: nxt, odd_rank: odd_rank })
+  }
+
+-- ============================================================
+-- Terminal
+-- ============================================================
+
+-- The game ends when exactly one player still holds cards.
+-- That player is the loser (they hold the Old Maid).
+fn terminal(state: State) -> GameStatus<Outcome> =
+  let players = players_of(state) in
+  let still_in = filter(players, fn (p) ->
+    match compare(size_of(state, Hand(p)), 0) { GT -> On; _ -> Off }) in
+  match still_in {
+    [loser] -> Ended(OldMaidLoser { player: loser });
+    _       -> Ongoing
+  }
+
+-- ============================================================
+-- Text I/O — defaults
+-- ============================================================
+
+fn action_to_text(action: Action, player: PlayerId) -> Text =
+  builtin_action_to_text(action, player)
+
+fn text_to_action(input: Text, view: View, player: PlayerId)
+  -> Result<Action, Text> =
+  builtin_text_to_action(input, view, player)
+
+fn view_to_text(view: View, player: PlayerId) -> Text =
+  builtin_view_to_text(view, player)
+
+fn outcome_to_text(outcome: Outcome, player: PlayerId) -> Text =
+  builtin_outcome_to_text(outcome, player)
