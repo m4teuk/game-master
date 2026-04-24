@@ -232,6 +232,29 @@ let rec eval (c : ctx) (te : Typecheck.texpr) : Value.t =
      | _ ->
        raise (Fatal "binary arithmetic on non-numeric (typechecker bug)"))
 
+  | TE_rel (op, l, r) ->
+    let lv = eval c l in
+    let rv = eval c r in
+    let ok = match op, lv, rv with
+      | Ast.RLt,  V_num a, V_num b -> a <  b
+      | Ast.RLte, V_num a, V_num b -> a <= b
+      | Ast.RGt,  V_num a, V_num b -> a >  b
+      | Ast.RGte, V_num a, V_num b -> a >= b
+      | Ast.REq,  _, _ -> Value.equal lv rv
+      | Ast.RNeq, _, _ -> not (Value.equal lv rv)
+      | _, _, _ ->
+        raise (Fatal "ordered relational op on non-numeric (typechecker bug)")
+    in
+    if ok then Value.flag_on else Value.flag_off
+
+  | TE_if { cond; then_; else_ } ->
+    (* Lazy: evaluate the condition first, then only the taken branch. *)
+    (match eval c cond with
+     | V_ctor { name = "On";  _ } -> eval c then_
+     | V_ctor { name = "Off"; _ } -> eval c else_
+     | _ ->
+       raise (Fatal "if-condition did not evaluate to Flag (typechecker bug)"))
+
   | TE_neg e ->
     (match eval c e with
      | V_num n -> V_num (-n)
@@ -368,7 +391,9 @@ let free_let_names_in (te : Tc_ast.texpr) : string list =
     | TE_lambda { params; body } ->
       let shadow' = List.map fst params @ shadow in
       go shadow' acc body
-    | TE_bin (_, l, r) -> go shadow (go shadow acc l) r
+    | TE_bin (_, l, r) | TE_rel (_, l, r) -> go shadow (go shadow acc l) r
+    | TE_if { cond; then_; else_ } ->
+      go shadow (go shadow (go shadow acc cond) then_) else_
     | TE_neg e -> go shadow acc e
   in
   List.rev (go [] [] te)

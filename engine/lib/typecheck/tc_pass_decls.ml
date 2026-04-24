@@ -452,9 +452,64 @@ let collect_lets decls =
 (* Entry                                                             *)
 (* ---------------------------------------------------------------- *)
 
+(* Inject a default type declaration if the user didn't write one.
+   These are the types that almost every ruleset would declare
+   identically:
+
+   - [PlayerDict = PlayerDict { }] — the empty per-player record,
+     used by games with no per-player public state.
+   - [Suit = Clubs | Diamonds | Hearts | Spades] — standard 4-suit deck.
+   - [Card = Card { suit: Suit, rank: Num }] — the shape assumed by
+     the stdlib card helpers ([fresh_deck], [card_rank], etc.).
+
+   User declarations always win — we only inject when the name is
+   absent. Injection happens after [resolve_type_ctors] so user-defined
+   types are already registered and can still "override" these. *)
+
+let inject_default_record env type_decls ~name ~fields =
+  match Types.lookup_type env name with
+  | Some _ -> (env, type_decls)
+  | None ->
+    let ctor = { Types.ctor_name = name;
+                 owner_type = name;
+                 fields;
+                 is_record = true } in
+    let ti = Types.TI_adt { ctors = [ctor]; is_record = true } in
+    let env = Types.add_type env name ti in
+    let env = Types.add_ctor env name ctor in
+    (env, type_decls @ [(name, ti)])
+
+let inject_default_enum env type_decls ~name ~ctor_names =
+  match Types.lookup_type env name with
+  | Some _ -> (env, type_decls)
+  | None ->
+    let ctors = List.map (fun n ->
+      { Types.ctor_name = n; owner_type = name;
+        fields = []; is_record = false }) ctor_names in
+    let ti = Types.TI_adt { ctors; is_record = false } in
+    let env = Types.add_type env name ti in
+    let env = List.fold_left (fun e (c : Types.ctor_info) ->
+      Types.add_ctor e c.ctor_name c) env ctors in
+    (env, type_decls @ [(name, ti)])
+
+let inject_defaults env type_decls =
+  let (env, type_decls) =
+    inject_default_record env type_decls ~name:"PlayerDict" ~fields:[]
+  in
+  let (env, type_decls) =
+    inject_default_enum env type_decls ~name:"Suit"
+      ~ctor_names:["Clubs"; "Diamonds"; "Hearts"; "Spades"]
+  in
+  let (env, type_decls) =
+    inject_default_record env type_decls ~name:"Card"
+      ~fields:[("suit", Types.T_user "Suit"); ("rank", Types.T_num)]
+  in
+  (env, type_decls)
+
 let run (env : Types.env) (errs : Tc_errors.t) (file : Ast.file) : result =
   let env, specs = collect_type_names env errs file.decls in
   let env, type_decls = resolve_type_ctors env errs specs in
+  let env, type_decls = inject_defaults env type_decls in
   let env, pile_decls = collect_piles env errs file.decls in
   let env, options_decl = collect_options env errs file.decls in
   let env, fn_decls = collect_fns env errs file.decls in

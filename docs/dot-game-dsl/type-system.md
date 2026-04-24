@@ -83,6 +83,21 @@ A valid `.game` file must declare these five:
 
 Declaring these with the wrong shape (e.g. `Config` as a multi-constructor sum) is a type error.
 
+**Auto-injected defaults.** If the ruleset omits any of these three
+types, the typechecker inserts the standard shape before any other
+declaration is resolved. User declarations always win — the defaults
+are only used when the name is absent:
+
+| Name | Injected default |
+|------|------------------|
+| `Suit` | `Clubs \| Diamonds \| Hearts \| Spades` |
+| `Card` | `Card { suit: Suit, rank: Num }` |
+| `PlayerDict` | `PlayerDict { }` (empty record) |
+
+These are exactly the shapes the stdlib card helpers
+([stdlib §16.5](./stdlib.md)) assume. Games with exotic decks just
+declare their own `Card` / `Suit` as before.
+
 ### 3.3 Required functions
 
 A valid `.game` file must declare these functions with exactly these signatures:

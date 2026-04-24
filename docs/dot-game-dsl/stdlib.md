@@ -366,19 +366,16 @@ branches evaluate eagerly (same as `if_eq`).
 
 ```
 require : (Flag, Text) -> Result<Unit, Text>
+assume  : (Result<T, E>) -> T
 ```
 
-`require(cond, msg) = if flag_is_on(cond) then Ok(Unit) else Err(msg)`.
-Designed for validation chains. Most `validate` rules become:
+`require(cond, msg) = if cond then Ok(Unit) else Err(msg)`. Designed for
+validation chains.
 
-```game
-fn validate(view, player, action) =
-  let cfg = view_config(view) in
-  match cfg { Config { turn, .. } ->
-    and_then(require(eq(player, turn), "It is not your turn"), fn (_) ->
-      … per-action checks …)
-  }
-```
+`assume(result)` unwraps the `Ok(value)` payload and raises `fatal(…)` if
+the result is `Err`. Use when the ruleset has already proven the result is
+`Ok` (e.g. a freshly-refilled deck has a top card) — saves the
+`match result { Ok(v) -> …; Err(_) -> fatal(…) }` ceremony.
 
 ### 16.5 Cards
 

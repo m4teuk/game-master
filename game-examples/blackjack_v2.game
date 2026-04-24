@@ -1,0 +1,112 @@
+-- ============================================================
+-- Blackjack — `_v2` (v0.2 language).
+-- ============================================================
+
+type Action  = Hit | Stand
+type Phase   = Playing | Settled
+type PResult = ResWon | ResLost | ResPush | ResBust | ResBJ
+type Outcome = Final { dealer_score: Num, results: List<(PlayerId, PResult)> }
+type Config  = Config {
+  turn: PlayerId, phase: Phase,
+  target: Num, dealer_stays: Num,
+  done: List<PlayerId>
+}
+
+pile Hand(owner: PlayerId) of Card visibility = public
+pile Dealer                of Card visibility = public
+pile Deck                  of Card visibility = public_size
+
+options { target: Num = 21, dealer_stays_on: Num = 17 }
+
+fn hard_value(c: Card) -> Num =
+  let r = card_rank(c) in
+  if r <= 10 then r else if r == 14 then 1 else 10
+
+fn hand_value(cards: List<Card>, target: Num) -> Num =
+  let base = sum(map(cards, fn (c) -> hard_value(c))) in
+  if any(cards, fn (c) -> card_has_rank(c, 14)) && base + 10 <= target
+  then base + 10 else base
+
+fn setup(players: List<PlayerId>, options: Options, rng: RNG)
+  -> Result<State, Text> =
+  let n = length(players) in
+  if n < 1 || n > 6 then Err("Blackjack requires 1-6 players")
+  else match options { Options { target, dealer_stays_on } ->
+    match players { [first, ..] ->
+      let s0 = new_state(Config { turn: first, phase: Playing,
+        target: target, dealer_stays: dealer_stays_on, done: [] }) in
+      let s1 = init_pile(s0, Deck, shuffle_list(rng, fresh_deck())) in
+      Ok(deal_initial(s1, players));
+      [] -> fatal("validated above")
+    }
+  }
+
+fn deal_initial(state: State, players: List<PlayerId>) -> State =
+  let s1 = deal_evenly(state, players, cards_in(state, Deck), 2, Hand) in
+  move_top(move_top(s1, from=Deck, to=Dealer), from=Deck, to=Dealer)
+
+fn validate(view: View, player: PlayerId, action: Action)
+  -> Result<Unit, Text> =
+  match view_config(view) { Config { turn, phase, .. } ->
+    match phase {
+      Settled -> Err("The hand is already settled");
+      Playing -> if player == turn then Ok(Unit)
+                 else Err("It is not your turn")
+    }
+  }
+
+fn apply(state: State, rng: RNG, action: Action, player: PlayerId) -> State =
+  match config_of(state) { Config { target, .. } ->
+    match action {
+      Hit ->
+        let s1 = move_top(state, from=Deck, to=Hand(player)) in
+        if hand_value(cards_in(s1, Hand(player)), target) < target
+        then s1 else finish_player(s1, player);
+      Stand -> finish_player(state, player)
+    }
+  }
+
+fn finish_player(state: State, player: PlayerId) -> State =
+  match config_of(state) { Config { done, target, dealer_stays, .. } ->
+    let new_done = append(done, [player]) in
+    if length(new_done) == length(players_of(state)) then
+      let s1 = with_config(state, Config { ..config_of(state), done: new_done }) in
+      let s2 = play_dealer(s1, target, dealer_stays) in
+      with_config(s2, Config { ..config_of(s2), phase: Settled })
+    else
+      with_config(state, Config { ..config_of(state), done: new_done,
+        turn: next_undone(players_of(state), player, new_done) })
+  }
+
+fn next_undone(players: List<PlayerId>, current: PlayerId,
+               done: List<PlayerId>) -> PlayerId =
+  let nxt = next_in_cycle(players, current) in
+  if member(done, nxt) == Off then nxt
+  else if nxt == current then current
+  else next_undone(players, nxt, done)
+
+fn play_dealer(state: State, target: Num, dealer_stays: Num) -> State =
+  if hand_value(cards_in(state, Dealer), target) >= dealer_stays then state
+  else play_dealer(move_top(state, from=Deck, to=Dealer), target, dealer_stays)
+
+fn terminal(state: State) -> GameStatus<Outcome> =
+  match config_of(state) { Config { phase, target, .. } ->
+    match phase {
+      Playing -> Ongoing;
+      Settled ->
+        let dealer = hand_value(cards_in(state, Dealer), target) in
+        Ended(Final { dealer_score: dealer,
+          results: map(players_of(state), fn (p) ->
+            (p, classify(state, p, target, dealer))) })
+    }
+  }
+
+fn classify(state: State, p: PlayerId, target: Num, dealer: Num) -> PResult =
+  let cards = cards_in(state, Hand(p)) in
+  let v = hand_value(cards, target) in
+  if length(cards) == 2 && v == target then ResBJ
+  else if v > target then ResBust
+  else if dealer > target then ResWon
+  else if v > dealer then ResWon
+  else if v == dealer then ResPush
+  else ResLost

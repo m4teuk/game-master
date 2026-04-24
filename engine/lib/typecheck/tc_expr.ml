@@ -146,6 +146,42 @@ let rec check_expr (env : Types.env) (errs : Tc_errors.t)
     let ty = assert_compatible errs span ~expected ~actual:Types.T_num in
     { node = TE_bin (op, l_t, r_t); ty; span }
 
+  | Ast.E_rel (op, l, r, span) ->
+    (* Ordered comparisons (< <= > >=) require Num both sides. Equality
+       (== !=) works on any equality-admissible type, with left's type
+       driving the right's expected type. *)
+    let l_t, r_t =
+      match op with
+      | Ast.RLt | Ast.RLte | Ast.RGt | Ast.RGte ->
+        let l_t = check_expr env errs ~expected:(Some Types.T_num) l in
+        let r_t = check_expr env errs ~expected:(Some Types.T_num) r in
+        (l_t, r_t)
+      | Ast.REq | Ast.RNeq ->
+        let l_t = check_expr env errs ~expected:None l in
+        let r_t = check_expr env errs ~expected:(Some l_t.ty) r in
+        if not (Types.equality_admissible env l_t.ty) then
+          Tc_errors.report errs span
+            (Printf.sprintf
+               "operator '%s' requires an equality-admissible type, got '%s'"
+               (match op with Ast.REq -> "==" | _ -> "!=")
+               (Types.string_of_ty l_t.ty));
+        (l_t, r_t)
+    in
+    let ty =
+      assert_compatible errs span ~expected ~actual:(Types.T_user "Flag")
+    in
+    { node = TE_rel (op, l_t, r_t); ty; span }
+
+  | Ast.E_if { cond; then_; else_; span } ->
+    let cond_t =
+      check_expr env errs ~expected:(Some (Types.T_user "Flag")) cond
+    in
+    let then_t = check_expr env errs ~expected then_ in
+    let else_t = check_expr env errs ~expected:(Some then_t.ty) else_ in
+    let ty = assert_compatible errs span ~expected ~actual:then_t.ty in
+    { node = TE_if { cond = cond_t; then_ = then_t; else_ = else_t };
+      ty; span }
+
   (* ----- C2 ----- *)
   | Ast.E_tuple (es, span) ->
     let n = List.length es in

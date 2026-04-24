@@ -834,6 +834,15 @@ let impl_require (_ : ctx) args =
     if flag_is_on cond then Value.ok V_unit else Value.err (V_text msg)
   | _ -> type_err "require" args
 
+let impl_assume (_ : ctx) args =
+  match args with
+  | [V_ctor { name = "Ok";  fields = [("value", v)] }] -> v
+  | [V_ctor { name = "Err"; fields = [("error", V_text msg)] }] ->
+    raise (Value.Fatal ("assume: Err(" ^ msg ^ ")"))
+  | [V_ctor { name = "Err"; _ }] ->
+    raise (Value.Fatal "assume: Err")
+  | _ -> type_err "assume" args
+
 (* §16.5  Cards. Assume shape Card { suit: Suit, rank: Num } with standard
    Suit = Clubs | Diamonds | Hearts | Spades. *)
 
@@ -1136,6 +1145,7 @@ let all : builtin list = [
 
   (* §16.4  Result helpers *)
   { name = "require";              capabilities = []; impl = impl_require };
+  { name = "assume";               capabilities = []; impl = impl_assume };
 
   (* §16.5  Cards *)
   { name = "fresh_deck";           capabilities = []; impl = impl_fresh_deck };

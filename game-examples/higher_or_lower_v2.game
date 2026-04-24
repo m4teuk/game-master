@@ -1,0 +1,55 @@
+-- ============================================================
+-- Higher or Lower — `_v2` (v0.2 language).
+-- Uses `if-then-else` (lazy), comparison operators, and the
+-- auto-injected `Card`/`Suit`/`PlayerDict` types.
+-- ============================================================
+
+type Action  = Higher | Lower
+type Phase   = Playing | Busted
+type Outcome = Won { player: PlayerId } | Lost { player: PlayerId }
+type Config  = Config { player: PlayerId, target: Num, streak: Num, phase: Phase }
+
+pile Deck    of Card visibility = public_size
+pile Used    of Card visibility = public
+pile Showing of Card visibility = public
+
+options { target_streak: Num = 5 }
+
+fn setup(players: List<PlayerId>, options: Options, rng: RNG)
+  -> Result<State, Text> =
+  match players { [p] -> match options { Options { target_streak } ->
+    let (showing, deck) = split_at(shuffle_list(rng, fresh_deck()), 1) in
+    let s0 = new_state(Config { player: p, target: target_streak,
+                                 streak: 0, phase: Playing }) in
+    Ok(init_pile(init_pile(s0, Deck, deck), Showing, showing))
+  }; _ -> Err("Higher or Lower is a 1-player game") }
+
+fn validate(view: View, player: PlayerId, action: Action)
+  -> Result<Unit, Text> = Ok(Unit)
+
+fn apply(state: State, rng: RNG, action: Action, player: PlayerId) -> State =
+  let s1 = refill(state, rng, Deck, Used, Off) in
+  let curr = assume(top_of(s1, Showing)) in
+  let next = assume(top_of(s1, Deck)) in
+  let s2 = move_top(move_top(s1, from=Showing, to=Used),
+                     from=Deck, to=Showing) in
+  let ok = match action {
+    Higher -> card_rank(next) > card_rank(curr);
+    Lower  -> card_rank(next) < card_rank(curr)
+  } in
+  match config_of(state) { Config { streak, phase, .. } ->
+    with_config(s2, Config { ..config_of(state),
+      streak: if ok then streak + 1 else 0,
+      phase:  if ok then phase      else Busted
+    })
+  }
+
+fn terminal(state: State) -> GameStatus<Outcome> =
+  match config_of(state) { Config { player, target, streak, phase } ->
+    match phase {
+      Busted  -> Ended(Lost { player: player });
+      Playing -> if streak >= target
+                 then Ended(Won { player: player })
+                 else Ongoing
+    }
+  }

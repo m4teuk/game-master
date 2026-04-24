@@ -66,6 +66,13 @@ type expr =
       span : span;
     }
   | E_bin of bin_op * expr * expr * span
+  | E_rel of rel_op * expr * expr * span
+  | E_if of {
+      cond : expr;
+      then_ : expr;
+      else_ : expr;
+      span : span;
+    }
   | E_neg of expr * span
 
 and record_body = {
@@ -89,6 +96,14 @@ and bin_op =
   | Mul
   | Div
   | Mod
+
+and rel_op =
+  | RLt
+  | RLte
+  | RGt
+  | RGte
+  | REq
+  | RNeq
 
 type field_decl = {
   name : string;
@@ -148,9 +163,9 @@ let span_of_expr = function
   | E_num (_, s) | E_text (_, s) | E_var (_, s) | E_ctor (_, s)
   | E_tuple (_, s) | E_list (_, s) | E_paren (_, s) | E_neg (_, s) -> s
   | E_record { span; _ } | E_let { span; _ } | E_match { span; _ }
-  | E_lambda { span; _ } -> span
+  | E_lambda { span; _ } | E_if { span; _ } -> span
   | E_app (_, _, s) -> s
-  | E_bin (_, _, _, s) -> s
+  | E_bin (_, _, _, s) | E_rel (_, _, _, s) -> s
 
 let span_of_pattern = function
   | P_wild s | P_var (_, s) | P_num (_, s) -> s

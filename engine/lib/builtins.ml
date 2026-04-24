@@ -224,6 +224,10 @@ let seed_values env =
     (* §16.4 Result helpers *)
     |> add_fn "require" [("cond", user "Flag"); ("msg", Types.T_text)]
                         (result Types.T_unit Types.T_text)
+    (* Unwrap a Result, fatal on Err. Useful when the ruleset has already
+       proven the Result is Ok (e.g. just-refilled deck) and wants to
+       skip the nested-match ceremony. *)
+    |> add_fn "assume"  [("result", result (v 0) (v 1))] (v 0)
 
     (* §16.5 Cards. These all assume the common shape
          type Suit = Clubs | Diamonds | Hearts | Spades

@@ -6,24 +6,30 @@ subset of that plan.
 
 ## 1. Measured savings
 
-Every existing `.game` file has a `_new.game` sibling that implements the
-same rules using the v0.1 stdlib additions (`docs/dot-game-dsl/stdlib.md`
-§16). Rules are identical; the only difference is how the author writes
-them. LOC here is source lines excluding blank lines and `--` comments.
+Every existing `.game` file has two siblings that implement the same
+rules against successive language versions. LOC is source lines
+excluding blank lines and `--` comments.
 
-| Game              | Old LOC | New LOC | Δ     |
-| ----------------- | ------: | ------: | ----- |
-| `higher_or_lower` |     100 |      56 | −44%  |
-| `pig`             |     119 |      52 | −56%  |
-| `old_maid`        |     176 |      77 | −56%  |
-| `war`             |     174 |      90 | −48%  |
-| `blackjack`       |     196 |     113 | −42%  |
-| `cheat`           |     200 |     103 | −48%  |
-| `go_fish`         |     299 |     171 | −43%  |
-| `crazy_eights`    |     326 |     177 | −46%  |
+- `*_new.game` — v0.1: pure stdlib additions (§16), optional text-I/O.
+- `*_v2.game` — v0.2: adds `if-then-else`, comparison operators
+  (`<`, `<=`, `==`, `!=`, `>=`, `>`), short-circuit `&&` / `||`, and
+  auto-injected defaults for `Card` / `Suit` / `PlayerDict`.
 
-Average reduction: roughly half. Not the "20–40 LOC per game" the original
-request aimed for — see §4 for why, and what would get us the rest of the way.
+| Game              | Orig | v0.1 (`_new`) | v0.2 (`_v2`) | Δ vs orig |
+| ----------------- | ---: | ------------: | -----------: | --------- |
+| `higher_or_lower` |  100 |            56 |           43 | −57%      |
+| `pig`             |  119 |            52 |           50 | −58%      |
+| `old_maid`        |  176 |            77 |           62 | −65%      |
+| `war`             |  174 |            90 |           81 | −53%      |
+| `blackjack`       |  196 |           113 |           95 | −52%      |
+| `cheat`           |  200 |           103 |           93 | −54%      |
+| `go_fish`         |  299 |           171 |          164 | −45%      |
+| `crazy_eights`    |  326 |           177 |          166 | −49%      |
+
+The v0.2 cut is substantially sharper for the shorter games. The two big
+phase-machine games (`go_fish`, `crazy_eights`) get a smaller percentage
+cut because their bulk is inherent case analysis across a 3-ctor phase
+× 5-or-6-ctor action matrix, which no amount of stdlib sugar can collapse.
 
 ## 2. Shipping set (v0.1)
 

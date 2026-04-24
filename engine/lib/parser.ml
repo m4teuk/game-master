@@ -236,7 +236,69 @@ let parse ~source_name tokens =
     | Token.KW_LET -> parse_let_expr ()
     | Token.KW_MATCH -> parse_match_expr ()
     | Token.KW_FN -> parse_lambda ()
-    | _ -> parse_add ()
+    | Token.KW_IF -> parse_if_expr ()
+    | _ -> parse_or ()
+
+  and parse_if_expr () =
+    let start = peek_span () in
+    expect Token.KW_IF;
+    let cond = parse_expr () in
+    expect Token.KW_THEN;
+    let then_ = parse_spine () in
+    expect Token.KW_ELSE;
+    let else_ = parse_spine () in
+    Ast.E_if { cond; then_; else_;
+               span = span_union start (Ast.span_of_expr else_) }
+
+  (* Short-circuit logical ops desugar at parse time to stdlib calls:
+     `a || b` → `flag_or(a, b)`, `a && b` → `flag_and(a, b)`.
+     (Not truly short-circuiting — `flag_and`/`flag_or` evaluate both
+     args. Authors who need lazy evaluation should use `if cond then
+     … else …` directly, which is lazy.) *)
+  and parse_or () =
+    let left = ref (parse_and ()) in
+    while Poly.(peek () = Token.PIPEPIPE) do
+      ignore (advance ());
+      let right = parse_and () in
+      let sp = span_union (Ast.span_of_expr !left) (Ast.span_of_expr right) in
+      left := Ast.E_app
+        (Ast.E_var ("flag_or", sp),
+         [Ast.A_pos !left; Ast.A_pos right], sp)
+    done;
+    !left
+
+  and parse_and () =
+    let left = ref (parse_rel ()) in
+    while Poly.(peek () = Token.AMPAMP) do
+      ignore (advance ());
+      let right = parse_rel () in
+      let sp = span_union (Ast.span_of_expr !left) (Ast.span_of_expr right) in
+      left := Ast.E_app
+        (Ast.E_var ("flag_and", sp),
+         [Ast.A_pos !left; Ast.A_pos right], sp)
+    done;
+    !left
+
+  (* Relational layer: one optional `<` / `<=` / `==` / `!=` / `>=` / `>`
+     between additive operands. Non-associative (no chaining). *)
+  and parse_rel () =
+    let left = parse_add () in
+    let rel_of = function
+      | Token.LT    -> Some Ast.RLt
+      | Token.LTEQ  -> Some Ast.RLte
+      | Token.GT    -> Some Ast.RGt
+      | Token.GTEQ  -> Some Ast.RGte
+      | Token.EQEQ  -> Some Ast.REq
+      | Token.NOTEQ -> Some Ast.RNeq
+      | _ -> None
+    in
+    match rel_of (peek ()) with
+    | None -> left
+    | Some op ->
+      ignore (advance ());
+      let right = parse_add () in
+      let sp = span_union (Ast.span_of_expr left) (Ast.span_of_expr right) in
+      Ast.E_rel (op, left, right, sp)
 
   and parse_let_expr () =
     let start = peek_span () in

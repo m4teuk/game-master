@@ -1,0 +1,77 @@
+-- ============================================================
+-- Old Maid — `_v2` (v0.2 language).
+-- ============================================================
+
+type Action  = Draw
+type OddCard = Jack | Queen | King | Ace
+type Outcome = OldMaidLoser { player: PlayerId }
+type Config  = Config { turn: PlayerId, odd_rank: Num }
+
+pile Hand(owner: PlayerId) of Card visibility = hand_visibility(owner)
+pile Discard               of Card visibility = public
+
+options { odd_card: OddCard = Queen }
+
+fn odd_rank_of(o: OddCard) -> Num =
+  match o { Jack -> 11; Queen -> 12; King -> 13; Ace -> 14 }
+
+fn setup(players: List<PlayerId>, options: Options, rng: RNG)
+  -> Result<State, Text> =
+  let n = length(players) in
+  if n < 2 || n > 6 then Err("Old Maid requires 2-6 players")
+  else match options { Options { odd_card } ->
+    let odd_rank = odd_rank_of(odd_card) in
+    let deck = filter(fresh_deck(), fn (c) ->
+      card_rank(c) != odd_rank || card_has_suit(c, Clubs)) in
+    match players { [first, ..] ->
+      let s0 = deal_cycle(new_state(Config { turn: first, odd_rank: odd_rank }),
+                          players, shuffle_list(rng, deck), Hand) in
+      let s1 = fold(players, s0, fn (s, p) -> pair_off_all(s, p)) in
+      Ok(with_config(s1, Config {
+        turn: first_active(s1, players), odd_rank: odd_rank }));
+      [] -> fatal("validated above")
+    }
+  }
+
+fn pair_off_all(state: State, p: PlayerId) -> State =
+  fold(range(2, 14), state, fn (s, r) -> pair_off_rank(s, p, r))
+
+fn pair_off_rank(state: State, p: PlayerId, r: Num) -> State =
+  let cards = cards_of_rank(cards_in(state, Hand(p)), r) in
+  let drop_n = (length(cards) / 2) * 2 in
+  fold(take(cards, drop_n), state, fn (s, c) ->
+    move_card(s, from=Hand(p), to=Discard, card=c))
+
+fn first_active(state: State, players: List<PlayerId>) -> PlayerId =
+  assume(find(players, fn (p) -> size_of(state, Hand(p)) > 0))
+
+fn validate(view: View, player: PlayerId, action: Action)
+  -> Result<Unit, Text> =
+  match view_config(view) { Config { turn, .. } ->
+    if player != turn then Err("It is not your turn")
+    else if assume(visible_size_of(view, Hand(player))) == 0
+         then Err("Your hand is empty")
+    else Ok(Unit)
+  }
+
+fn apply(state: State, rng: RNG, action: Action, player: PlayerId) -> State =
+  let victim = next_active(state, players_of(state), player) in
+  let cards = cards_in(state, Hand(victim)) in
+  let c = assume(nth(cards, random_int(rng, 0, length(cards) - 1))) in
+  let s1 = move_card(state, from=Hand(victim), to=Hand(player), card=c) in
+  let s2 = pair_off_rank(s1, player, card_rank(c)) in
+  with_config(s2, Config { ..config_of(s2),
+    turn: next_active(s2, players_of(s2), player) })
+
+fn next_active(state: State, players: List<PlayerId>, from: PlayerId) -> PlayerId =
+  let nxt = next_in_cycle(players, from) in
+  if size_of(state, Hand(nxt)) > 0 then nxt
+  else if nxt == from then from
+  else next_active(state, players, nxt)
+
+fn terminal(state: State) -> GameStatus<Outcome> =
+  let still = filter(players_of(state), fn (p) -> size_of(state, Hand(p)) > 0) in
+  match still {
+    [loser] -> Ended(OldMaidLoser { player: loser });
+    _       -> Ongoing
+  }
