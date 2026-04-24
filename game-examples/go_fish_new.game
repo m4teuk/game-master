@@ -1,0 +1,194 @@
+-- ============================================================
+-- Go Fish — `_new` version (v0.1 stdlib).
+-- Rules identical to go_fish.game; fresh_deck, cards_of_rank,
+-- deal_evenly, hand_visibility, require compress most helpers.
+-- ============================================================
+
+type Suit = Clubs | Diamonds | Hearts | Spades
+type Card = Card { suit: Suit, rank: Num }
+
+type Phase =
+  | ShouldAsk
+  | Asked      { target: PlayerId, rank: Num }
+  | ShouldDraw { last_rank: Num }
+
+type Action =
+  | AskFor { target: PlayerId, rank: Num }
+  | Give | GoFish | Draw | Pass
+
+type Outcome = Winner { player: PlayerId } | Tie { players: List<PlayerId> }
+type Config  = Config { turn: PlayerId, phase: Phase }
+type PlayerDict = PlayerDict { completed: Num }
+
+pile Hand(owner: PlayerId)      of Card visibility = hand_visibility(owner)
+pile Book(owner: PlayerId, r: Num) of Card visibility = public
+pile Deck                        of Card visibility = public_size
+
+fn hand_size_for(n: Num) -> Num = when_flag(eq_num(n, 2), 7, 5)
+
+fn setup(players: List<PlayerId>, options: Options, rng: RNG)
+  -> Result<State, Text> =
+  let n = length(players) in
+  and_then(require(between(2, n, 6), "Go Fish requires 2-6 players"), fn (_u) ->
+    let per = hand_size_for(n) in
+    let (dealt, rest) = split_at(shuffle_list(rng, fresh_deck()), n * per) in
+    match players { [first, ..] ->
+      let s0 = new_state(Config { turn: first, phase: ShouldAsk }) in
+      let s1 = deal_evenly(s0, players, dealt, per, Hand) in
+      Ok(init_pile(s1, Deck, rest));
+      [] -> fatal("validated above")
+    })
+
+fn set_phase(state: State, ph: Phase) -> State =
+  with_config(state, Config { ..config_of(state), phase: ph })
+
+fn advance_turn(state: State) -> State =
+  let cfg = config_of(state) in
+  match cfg { Config { turn, .. } ->
+    with_config(state, Config {
+      turn: next_in_cycle(players_of(state), turn), phase: ShouldAsk })
+  }
+
+fn validate(view: View, player: PlayerId, action: Action)
+  -> Result<Unit, Text> =
+  match view_config(view) { Config { turn, phase } ->
+    match action {
+      AskFor { target, rank } ->
+        match phase {
+          ShouldAsk ->
+            and_then(require(eq(player, turn), "It is not your turn"), fn (_u) ->
+            and_then(require(flag_and(ne_num_pid(player, target),
+                                       member(players_of_view(view), target)),
+                             "Invalid ask target"), fn (_u) ->
+              match view_of(view, Hand(player)) {
+                Contents(cs) -> require(any(cs, fn (c) -> card_has_rank(c, rank)),
+                                         "You must hold a card of that rank");
+                _ -> fatal("own hand should be visible")
+              }));
+          _ -> Err("Not in an asking phase")
+        };
+      Give ->
+        match phase {
+          Asked { target, rank } ->
+            and_then(require(eq(player, target), "You are not the asked player"), fn (_u) ->
+              match view_of(view, Hand(player)) {
+                Contents(cs) -> require(any(cs, fn (c) -> card_has_rank(c, rank)),
+                                         "You have none of that rank; say GoFish");
+                _ -> fatal("own hand should be visible")
+              });
+          _ -> Err("There is no pending ask")
+        };
+      GoFish ->
+        match phase {
+          Asked { target, rank } ->
+            and_then(require(eq(player, target), "You are not the asked player"), fn (_u) ->
+              match view_of(view, Hand(player)) {
+                Contents(cs) -> require(flag_not(any(cs, fn (c) -> card_has_rank(c, rank))),
+                                         "You hold that rank; you must Give");
+                _ -> fatal("own hand should be visible")
+              });
+          _ -> Err("There is no pending ask")
+        };
+      Draw -> validate_draw_pass(view, player, phase, On);
+      Pass -> validate_draw_pass(view, player, phase, Off)
+    }
+  }
+
+-- "ne_num" is for Nums; we also need a non-equal check for PlayerIds.
+fn ne_num_pid(a: PlayerId, b: PlayerId) -> Flag = flag_not(eq(a, b))
+
+fn validate_draw_pass(view: View, player: PlayerId, phase: Phase,
+                       expect_draw: Flag) -> Result<Unit, Text> =
+  match view_config(view) { Config { turn, .. } ->
+    and_then(require(eq(player, turn), "It is not your turn"), fn (_u) ->
+    and_then(phase_allows_draw(view, player, phase), fn (_u) ->
+      match visible_size_of(view, Deck) {
+        Err(_) -> fatal("deck size should be visible");
+        Ok(n)  ->
+          match flag_and(is_zero(n), flag_not(expect_draw)) {
+            On -> Ok(Unit);
+            Off -> match flag_and(is_positive(n), expect_draw) {
+              On -> Ok(Unit);
+              Off -> when_flag(expect_draw, Err("Deck is empty; use Pass"),
+                                             Err("Deck is not empty; use Draw"))
+            }
+          }
+      }))
+  }
+
+fn phase_allows_draw(view: View, player: PlayerId, phase: Phase)
+  -> Result<Unit, Text> =
+  match phase {
+    ShouldDraw { .. } -> Ok(Unit);
+    ShouldAsk -> match view_of(view, Hand(player)) {
+      Contents([]) -> Ok(Unit);
+      Contents(_)  -> Err("You still have cards; you must Ask");
+      _ -> fatal("own hand should be visible")
+    };
+    Asked { .. } -> Err("There is a pending ask; respond first")
+  }
+
+fn apply(state: State, rng: RNG, action: Action, player: PlayerId) -> State =
+  match config_of(state) { Config { turn, phase } ->
+    match action {
+      AskFor { target, rank } -> set_phase(state, Asked { target: target, rank: rank });
+      Give -> match phase {
+        Asked { target, rank } ->
+          let matches = cards_of_rank(cards_in(state, Hand(target)), rank) in
+          let s1 = fold(matches, state, fn (s, c) ->
+            move_card(s, from=Hand(target), to=Hand(turn), card=c)) in
+          set_phase(check_book(s1, turn, rank), ShouldAsk);
+        _ -> fatal("give in non-Asked phase")
+      };
+      GoFish -> match phase {
+        Asked { rank, .. } -> set_phase(state, ShouldDraw { last_rank: rank });
+        _ -> fatal("gofish in non-Asked phase")
+      };
+      Draw -> match top_of(state, Deck) {
+        Err(_) -> fatal("deck empty at draw time");
+        Ok(drawn) ->
+          let s1 = move_top(state, from=Deck, to=Hand(turn)) in
+          let s2 = check_book(s1, turn, card_rank(drawn)) in
+          match phase {
+            ShouldDraw { last_rank } ->
+              when_flag(eq_num(card_rank(drawn), last_rank),
+                         set_phase(s2, ShouldAsk), advance_turn(s2));
+            _ -> set_phase(s2, ShouldAsk)
+          }
+      };
+      Pass -> advance_turn(state)
+    }
+  }
+
+fn check_book(state: State, player: PlayerId, rank: Num) -> State =
+  let ms = cards_of_rank(cards_in(state, Hand(player)), rank) in
+  when_flag(eq_num(length(ms), 4), form_book(state, player, rank, ms), state)
+
+fn form_book(state: State, player: PlayerId, rank: Num,
+             cards: List<Card>) -> State =
+  let s1 = fold(cards, state, fn (s, c) ->
+    move_card(s, from=Hand(player), to=Book(player, rank), card=c)) in
+  update_player_dict(s1, player, fn (pd) ->
+    match pd { PlayerDict { completed } ->
+      PlayerDict { completed: completed + 1 } })
+
+fn terminal(state: State) -> GameStatus<Outcome> =
+  let players = players_of(state) in
+  let total = sum(map(players, fn (p) ->
+    match player_dict(state, p) { PlayerDict { completed } -> completed })) in
+  match eq_num(total, 13) {
+    Off -> Ongoing;
+    On  ->
+      let scores = map(players, fn (p) ->
+        (p, match player_dict(state, p) { PlayerDict { completed } -> completed })) in
+      let best = fold(scores, 0, fn (acc, pair) ->
+        match pair { (_pid, n) -> max(acc, n) }) in
+      let winners = filter(scores, fn (pair) ->
+        match pair { (_pid, n) -> eq_num(n, best) }) in
+      let ids = map(winners, fn (pair) -> match pair { (p, _n) -> p }) in
+      match ids {
+        [p]         -> Ended(Winner { player: p });
+        [_a, _b, ..] -> Ended(Tie { players: ids });
+        []          -> fatal("at least one player must have max")
+      }
+  }

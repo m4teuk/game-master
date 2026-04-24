@@ -265,7 +265,7 @@ and call (c : ctx) (fn : Value.t) (args : Value.t list) : Value.t =
          raise (Fatal
                   (Printf.sprintf
                      "stdlib '%s' is not available in %s context \
-                      (stdlib §16)"
+                      (stdlib §17)"
                      name (capability_name c.capability)));
        b.impl c args)
 

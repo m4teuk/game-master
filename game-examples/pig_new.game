@@ -1,0 +1,65 @@
+-- ============================================================
+-- Pig — `_new` version (v0.1 stdlib).
+-- Rules identical to pig.game; implemented against fresh_deck,
+-- cards_of_rank, deal_evenly, between, when_flag, require.
+-- ============================================================
+
+type Suit = Clubs | Diamonds | Hearts | Spades
+type Card = Card { suit: Suit, rank: Num }
+
+type Action  = Pass { card: Card }
+type Outcome = Winner { player: PlayerId }
+type Config  = Config { turn: PlayerId, target: Num }
+type PlayerDict = PlayerDict {}
+
+pile Hand(owner: PlayerId) of Card visibility = hand_visibility(owner)
+
+options { target_count: Num = 4 }
+
+fn setup(players: List<PlayerId>, options: Options, rng: RNG)
+  -> Result<State, Text> =
+  let n = length(players) in
+  match options { Options { target_count } ->
+    and_then(require(between(3, n, 6), "Pig requires 3-6 players"), fn (_u) ->
+    and_then(require(between(2, target_count, 4),
+                     "target_count must be 2..4"), fn (_u) ->
+      let ranks_needed = take(range(2, 14), n) in
+      let game_cards = filter(fresh_deck(), fn (c) ->
+        member(ranks_needed, card_rank(c))) in
+      let shuffled = shuffle_list(rng, game_cards) in
+      match players { [first, ..] ->
+        let s0 = new_state(Config { turn: first, target: target_count }) in
+        Ok(deal_evenly(s0, players, shuffled, 4, Hand));
+        [] -> fatal("players validated above")
+      }))
+  }
+
+fn validate(view: View, player: PlayerId, action: Action)
+  -> Result<Unit, Text> =
+  match view_config(view) { Config { turn, .. } ->
+    match action { Pass { card } ->
+      and_then(require(eq(player, turn), "It is not your turn"), fn (_u) ->
+        match view_of(view, Hand(player)) {
+          Contents(hand) -> require(member(hand, card),
+                                     "You do not hold that card");
+          _ -> fatal("own hand should be visible")
+        })
+    }
+  }
+
+fn apply(state: State, rng: RNG, action: Action, player: PlayerId) -> State =
+  match action { Pass { card } ->
+    let nxt = next_in_cycle(players_of(state), player) in
+    let s1 = move_card(state, from=Hand(player), to=Hand(nxt), card=card) in
+    with_config(s1, Config { ..config_of(state), turn: nxt })
+  }
+
+fn terminal(state: State) -> GameStatus<Outcome> =
+  match config_of(state) { Config { target, .. } ->
+    match find(players_of(state), fn (p) ->
+      any(range(2, 14), fn (r) ->
+        gte(length(cards_of_rank(cards_in(state, Hand(p)), r)), target))) {
+      Ok(w)  -> Ended(Winner { player: w });
+      Err(_) -> Ongoing
+    }
+  }

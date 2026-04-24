@@ -4,7 +4,7 @@
     keep the two modules from depending on each other: [Interp] consumes
     the table via [make_ctx ~builtins]; this module only produces it.
 
-    Capability checks (stdlib §16 availability matrix) are enforced here,
+    Capability checks (stdlib §17 availability matrix) are enforced here,
     not in [Interp], so the list of "which contexts may call [temp_pile]"
     lives next to the implementation it guards. *)
 
