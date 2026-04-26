@@ -58,15 +58,20 @@ See [runtime.md §6](./runtime.md) for the precise model.
 
 ## 3. Required file contents
 
-Every `.game` file must declare these five types:
+Every `.game` file must declare these types:
 
-| Name | Role |
-|------|------|
-| `Card` | Sum of all card kinds in this game |
-| `Action` | Sum of all player moves |
-| `Outcome` | Game result (the `R` in `GameStatus<R>`) |
-| `Config` | Single-constructor record: global public state schema |
-| `PlayerDict` | Single-constructor record: per-player public state schema (may be empty) |
+| Name | Role | Required? |
+|------|------|-----------|
+| `Card` | Sum of all card kinds in this game | optional — defaults to `Card { suit: Suit, rank: Num }` if omitted |
+| `Suit` | The card-suit enum | optional — defaults to `Clubs \| Diamonds \| Hearts \| Spades` if omitted |
+| `Action` | Sum of all player moves | yes |
+| `Outcome` | Game result (the `R` in `GameStatus<R>`) | yes |
+| `Config` | Single-constructor record: global public state schema | yes |
+| `PlayerDict` | Single-constructor record: per-player public state schema (may be empty) | optional — defaults to `PlayerDict { }` if omitted |
+
+User declarations always win — defaults are only injected when the name
+is absent (and, for `Suit`, when none of the standard ctor names are
+already in scope).
 
 And these functions:
 
@@ -106,7 +111,7 @@ Details:
 
 ### 3.1 Text I/O functions
 
-These render game values for human consumption and parse player input. They are required — every game declares all four — but a one-line delegation to stdlib built-ins (`builtin_action_to_text`, `builtin_text_to_action`, `builtin_view_to_text`, `builtin_outcome_to_text`) is the common implementation. Custom implementations give authors full control over CLI formatting.
+These render game values for human consumption and parse player input. They are **optional** — if a ruleset omits any of them, the linker synthesizes a one-line delegation to the matching `builtin_*_to_*` automatically. Authors who want custom CLI formatting declare them explicitly.
 
 - **`action_to_text(action, player)`**: renders an action for log and history display. Must be self-describing (it is read with no surrounding context) and does not receive a `View` — intentional, to keep log entries universally readable.
 - **`text_to_action(input, view, player)`**: parses a player's raw text into an `Action`. Receives the view for context-sensitive parsing ("play this" → which card). Returns `Err(msg)` on parse failure; the engine shows the error. **Does not validate game logic** — a parsed-but-illegal action is caught by `validate` downstream. Information leakage is not a concern since the parser operates on the same view the player sees.

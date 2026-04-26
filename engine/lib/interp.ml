@@ -446,19 +446,37 @@ let eval_top_lets c lets =
 let build_toplevel (link : Link.t) (builtins : builtin list)
     : (string * Value.t) list =
   let tfile = link.tfile in
-  (* Fn closures — params, body, captured=[]. *)
+  let mk_fn name (texpr : Tc_ast.texpr) =
+    match texpr.node with
+    | TE_lambda { params; body } ->
+      (name, Value.V_fn { params; body; captured = [] })
+    | _ ->
+      (* Pass C wraps every fn body as a TE_lambda; the linker's
+         text-I/O defaults are also synthesised as TE_lambda. *)
+      raise (Fatal
+               (Printf.sprintf
+                  "build_toplevel: fn '%s' is not a lambda \
+                   (interpreter bug)" name))
+  in
+  (* User-declared fn closures. *)
   let fn_entries =
-    List.map (fun (name, (texpr : Tc_ast.texpr)) ->
-      match texpr.node with
-      | TE_lambda { params; body } ->
-        (name, Value.V_fn { params; body; captured = [] })
-      | _ ->
-        (* Pass C wraps every fn body as a TE_lambda. *)
-        raise (Fatal
-                 (Printf.sprintf
-                    "build_toplevel: fn '%s' is not a lambda \
-                     (interpreter bug)" name)))
-      (Typecheck.top_fns tfile)
+    List.map (fun (name, te) -> mk_fn name te) (Typecheck.top_fns tfile)
+  in
+  (* Text-I/O fns: include the link's resolved version (user-declared
+     or linker-synthesised default) for any name not already present.
+     Without this, [Engine.lookup_required] can't find a synthesised
+     default at runtime. *)
+  let text_io = [
+    ("action_to_text",  link.action_to_text);
+    ("text_to_action",  link.text_to_action);
+    ("view_to_text",    link.view_to_text);
+    ("outcome_to_text", link.outcome_to_text);
+  ] in
+  let fn_entries =
+    List.fold_left (fun acc (name, te) ->
+      if List.mem_assoc name acc then acc
+      else mk_fn name te :: acc)
+      fn_entries text_io
   in
   (* Pile handles — nullary → V_pile_ref, parameterized → V_pile_ctor. *)
   let pile_entries =

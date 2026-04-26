@@ -33,17 +33,22 @@ fn setup(players: List<PlayerId>, options: Options, rng: RNG)
   if n < 1 || n > 6 then Err("Blackjack requires 1-6 players")
   else match options { Options { target, dealer_stays_on } ->
     match players { [first, ..] ->
+      -- Split the shuffled deck once: 2 cards per player, 2 for the
+      -- dealer's initial hand, the rest stocks the Deck pile. Doing
+      -- this on the LIST (before init_pile) avoids the deal_evenly
+      -- "duplicates from source" pitfall — deal_evenly seeds piles
+      -- from a passed-in card list, it doesn't move out of any pile.
+      let shuffled = shuffle_list(rng, fresh_deck()) in
+      let (player_hands, after_players) = split_at(shuffled, n * 2) in
+      let (dealer_hand, rest) = split_at(after_players, 2) in
       let s0 = new_state(Config { turn: first, phase: Playing,
         target: target, dealer_stays: dealer_stays_on, done: [] }) in
-      let s1 = init_pile(s0, Deck, shuffle_list(rng, fresh_deck())) in
-      Ok(deal_initial(s1, players));
+      let s1 = deal_evenly(s0, players, player_hands, 2, Hand) in
+      let s2 = init_pile(s1, Dealer, dealer_hand) in
+      Ok(init_pile(s2, Deck, rest));
       [] -> fatal("validated above")
     }
   }
-
-fn deal_initial(state: State, players: List<PlayerId>) -> State =
-  let s1 = deal_evenly(state, players, cards_in(state, Deck), 2, Hand) in
-  move_top(move_top(s1, from=Deck, to=Dealer), from=Deck, to=Dealer)
 
 fn validate(view: View, player: PlayerId, action: Action)
   -> Result<Unit, Text> =
