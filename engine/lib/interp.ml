@@ -232,29 +232,6 @@ let rec eval (c : ctx) (te : Typecheck.texpr) : Value.t =
      | _ ->
        raise (Fatal "binary arithmetic on non-numeric (typechecker bug)"))
 
-  | TE_rel (op, l, r) ->
-    let lv = eval c l in
-    let rv = eval c r in
-    let ok = match op, lv, rv with
-      | Ast.RLt,  V_num a, V_num b -> a <  b
-      | Ast.RLte, V_num a, V_num b -> a <= b
-      | Ast.RGt,  V_num a, V_num b -> a >  b
-      | Ast.RGte, V_num a, V_num b -> a >= b
-      | Ast.REq,  _, _ -> Value.equal lv rv
-      | Ast.RNeq, _, _ -> not (Value.equal lv rv)
-      | _, _, _ ->
-        raise (Fatal "ordered relational op on non-numeric (typechecker bug)")
-    in
-    if ok then Value.flag_on else Value.flag_off
-
-  | TE_if { cond; then_; else_ } ->
-    (* Lazy: evaluate the condition first, then only the taken branch. *)
-    (match eval c cond with
-     | V_ctor { name = "On";  _ } -> eval c then_
-     | V_ctor { name = "Off"; _ } -> eval c else_
-     | _ ->
-       raise (Fatal "if-condition did not evaluate to Flag (typechecker bug)"))
-
   | TE_neg e ->
     (match eval c e with
      | V_num n -> V_num (-n)
@@ -288,7 +265,7 @@ and call (c : ctx) (fn : Value.t) (args : Value.t list) : Value.t =
          raise (Fatal
                   (Printf.sprintf
                      "stdlib '%s' is not available in %s context \
-                      (stdlib §17)"
+                      (stdlib §16)"
                      name (capability_name c.capability)));
        b.impl c args)
 
@@ -391,9 +368,7 @@ let free_let_names_in (te : Tc_ast.texpr) : string list =
     | TE_lambda { params; body } ->
       let shadow' = List.map fst params @ shadow in
       go shadow' acc body
-    | TE_bin (_, l, r) | TE_rel (_, l, r) -> go shadow (go shadow acc l) r
-    | TE_if { cond; then_; else_ } ->
-      go shadow (go shadow (go shadow acc cond) then_) else_
+    | TE_bin (_, l, r) -> go shadow (go shadow acc l) r
     | TE_neg e -> go shadow acc e
   in
   List.rev (go [] [] te)
@@ -446,37 +421,19 @@ let eval_top_lets c lets =
 let build_toplevel (link : Link.t) (builtins : builtin list)
     : (string * Value.t) list =
   let tfile = link.tfile in
-  let mk_fn name (texpr : Tc_ast.texpr) =
-    match texpr.node with
-    | TE_lambda { params; body } ->
-      (name, Value.V_fn { params; body; captured = [] })
-    | _ ->
-      (* Pass C wraps every fn body as a TE_lambda; the linker's
-         text-I/O defaults are also synthesised as TE_lambda. *)
-      raise (Fatal
-               (Printf.sprintf
-                  "build_toplevel: fn '%s' is not a lambda \
-                   (interpreter bug)" name))
-  in
-  (* User-declared fn closures. *)
+  (* Fn closures — params, body, captured=[]. *)
   let fn_entries =
-    List.map (fun (name, te) -> mk_fn name te) (Typecheck.top_fns tfile)
-  in
-  (* Text-I/O fns: include the link's resolved version (user-declared
-     or linker-synthesised default) for any name not already present.
-     Without this, [Engine.lookup_required] can't find a synthesised
-     default at runtime. *)
-  let text_io = [
-    ("action_to_text",  link.action_to_text);
-    ("text_to_action",  link.text_to_action);
-    ("view_to_text",    link.view_to_text);
-    ("outcome_to_text", link.outcome_to_text);
-  ] in
-  let fn_entries =
-    List.fold_left (fun acc (name, te) ->
-      if List.mem_assoc name acc then acc
-      else mk_fn name te :: acc)
-      fn_entries text_io
+    List.map (fun (name, (texpr : Tc_ast.texpr)) ->
+      match texpr.node with
+      | TE_lambda { params; body } ->
+        (name, Value.V_fn { params; body; captured = [] })
+      | _ ->
+        (* Pass C wraps every fn body as a TE_lambda. *)
+        raise (Fatal
+                 (Printf.sprintf
+                    "build_toplevel: fn '%s' is not a lambda \
+                     (interpreter bug)" name)))
+      (Typecheck.top_fns tfile)
   in
   (* Pile handles — nullary → V_pile_ref, parameterized → V_pile_ctor. *)
   let pile_entries =

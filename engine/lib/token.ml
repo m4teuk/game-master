@@ -12,9 +12,6 @@ type t =
   | KW_OF
   | KW_VISIBILITY
   | KW_MOD
-  | KW_IF
-  | KW_THEN
-  | KW_ELSE
   | LPAREN
   | RPAREN
   | LBRACE
@@ -25,12 +22,6 @@ type t =
   | COLON
   | SEMI
   | EQ
-  | EQEQ
-  | NOTEQ
-  | LTEQ
-  | GTEQ
-  | AMPAMP
-  | PIPEPIPE
   | ARROW
   | PIPE
   | DOTDOT
@@ -62,9 +53,6 @@ let to_string = function
   | KW_OF -> "'of'"
   | KW_VISIBILITY -> "'visibility'"
   | KW_MOD -> "'mod'"
-  | KW_IF -> "'if'"
-  | KW_THEN -> "'then'"
-  | KW_ELSE -> "'else'"
   | LPAREN -> "'('"
   | RPAREN -> "')'"
   | LBRACE -> "'{'"
@@ -75,12 +63,6 @@ let to_string = function
   | COLON -> "':'"
   | SEMI -> "';'"
   | EQ -> "'='"
-  | EQEQ -> "'=='"
-  | NOTEQ -> "'!='"
-  | LTEQ -> "'<='"
-  | GTEQ -> "'>='"
-  | AMPAMP -> "'&&'"
-  | PIPEPIPE -> "'||'"
   | ARROW -> "'->'"
   | PIPE -> "'|'"
   | DOTDOT -> "'..'"
