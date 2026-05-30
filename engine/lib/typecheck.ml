@@ -24,6 +24,8 @@ and texpr_node = Tc_ast.texpr_node =
       body : texpr;
     }
   | TE_bin of Ast.bin_op * texpr * texpr
+  | TE_rel of Ast.rel_op * texpr * texpr
+  | TE_if of { cond : texpr; then_ : texpr; else_ : texpr }
   | TE_neg of texpr
 
 and tpattern = Tc_ast.tpattern = {

@@ -71,21 +71,44 @@ Records are not structurally typed — `Config { turn, phase }` and `Snapshot { 
 
 ### 3.2 Required user types
 
-A valid `.game` file must declare these five:
+A valid `.game` file must reference these five user types — but three
+of them have linker-supplied defaults, so the ruleset only needs to
+declare a type name explicitly when it overrides the default shape.
 
-| Name | Role |
-|------|------|
-| `Card` | The game's card type. Used as the `C` in `PileRef<C>` throughout. |
-| `Action` | Sum of all player moves. |
-| `Outcome` | Game result; the `R` in `GameStatus<R>` returned by `terminal`. |
-| `Config` | Single-constructor record; the global public state schema. |
-| `PlayerDict` | Single-constructor record; per-player public state schema. May have zero fields. |
+| Name | Role | Required? |
+|------|------|-----------|
+| `Card` | The game's card type. Used as the `C` in `PileRef<C>` throughout. | optional, default below |
+| `Action` | Sum of all player moves. | yes |
+| `Outcome` | Game result; the `R` in `GameStatus<R>` returned by `terminal`. | yes |
+| `Config` | Single-constructor record; the global public state schema. | yes |
+| `PlayerDict` | Single-constructor record; per-player public state schema. May have zero fields. | optional, default below |
 
-Declaring these with the wrong shape (e.g. `Config` as a multi-constructor sum) is a type error.
+`Suit` is also auto-provided when missing (used by `Card`'s default
+shape). Declaring any of these with the wrong shape (e.g. `Config` as
+a multi-constructor sum) is a type error.
+
+**Auto-injected defaults.** If the ruleset omits any of these three
+types, the typechecker inserts the standard shape before any other
+declaration is resolved. User declarations always win — the defaults
+are only used when the name is absent:
+
+| Name | Injected default |
+|------|------------------|
+| `Suit` | `Clubs \| Diamonds \| Hearts \| Spades` |
+| `Card` | `Card { suit: Suit, rank: Num }` |
+| `PlayerDict` | `PlayerDict { }` (empty record) |
+
+These are exactly the shapes the stdlib card helpers
+([stdlib §16.5](./stdlib.md)) assume. Games with exotic decks just
+declare their own `Card` / `Suit` as before.
 
 ### 3.3 Required functions
 
-A valid `.game` file must declare these functions with exactly these signatures:
+A valid `.game` file must declare these functions with exactly these
+signatures — except for the four text-I/O functions, which are
+optional. When omitted, the linker synthesises a one-line delegation
+to the matching `builtin_*_to_*` automatically (rulesets that want
+custom CLI formatting still declare them explicitly).
 
 ```
 fn setup         : (List<PlayerId>, Options, RNG) -> Result<State, Text>

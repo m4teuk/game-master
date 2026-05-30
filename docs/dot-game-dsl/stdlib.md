@@ -299,7 +299,166 @@ The engine stores player identities as whatever the transport provides (typicall
 
 These are provided as stdlib so rulesets don't have to re-invent player identity handling.
 
-## 16. Availability summary
+## 16. Extended stdlib (v0.1, non-breaking additions)
+
+All additions in this section are pure stdlib — no parser, type-system, or
+runtime-contract changes. Every existing game compiles unchanged. Games that
+want terser rule code opt in by calling the new functions.
+
+### 16.1 Extended list ops
+
+```
+range    : (Num, Num) -> List<Num>            -- inclusive on both ends
+take     : (List<T>, Num) -> List<T>
+drop     : (List<T>, Num) -> List<T>
+count    : (List<T>, (T) -> Flag) -> Num
+find     : (List<T>, (T) -> Flag) -> Result<T, Text>
+concat   : (List<List<T>>) -> List<T>
+reverse  : (List<T>) -> List<T>
+repeat   : (Num, T) -> List<T>                -- n copies of item
+zip      : (List<T>, List<U>) -> List<(T, U)> -- stops at shorter
+sum      : (List<Num>) -> Num
+is_empty : (List<T>) -> Flag
+head     : (List<T>) -> Result<T, Text>
+tail     : (List<T>) -> Result<List<T>, Text>
+```
+
+`range(2, 14)` yields `[2, 3, …, 14]`. `lo > hi` returns the empty list.
+
+`take(xs, n)` / `drop(xs, n)` are `split_at`'s two halves in isolation —
+pass `n > length(xs)` to take everything / nothing. Negative `n` calls
+`fatal`.
+
+`count(xs, f)` = `length(filter(xs, f))`. `find(xs, f)` returns `Ok(x)` for
+the first `x` with `f(x) = On`, else `Err("find: no matching element")`.
+
+`concat([[1,2], [3], []]) = [1, 2, 3]`.
+
+`head`/`tail` let you destructure lists without forcing a `match`; useful
+when you *know* it's non-empty but don't want a refutable binding.
+
+### 16.2 Numeric predicates and helpers
+
+```
+gt, lt, gte, lte, eq_num, ne_num : (Num, Num) -> Flag
+between                           : (Num, Num, Num) -> Flag   -- (lo, x, hi), inclusive
+min, max                          : (Num, Num) -> Num
+is_zero, is_positive, is_negative : (Num) -> Flag
+```
+
+These replace `match compare(x, y) { … }` for the common cases. `gt(a, b)`
+returns `On` iff `a > b`. `between(lo, x, hi) = On` iff `lo <= x && x <= hi`.
+
+### 16.3 Flag combinators
+
+```
+flag_and  : (Flag, Flag) -> Flag
+flag_or   : (Flag, Flag) -> Flag
+flag_not  : (Flag) -> Flag
+when_flag : (Flag, T, T) -> T
+```
+
+`when_flag(cond, then_v, else_v)` is a `Flag`-scrutinee branch — equivalent
+to `if_eq(cond, On, then_v, else_v)` but reads as what it is. Both
+branches evaluate eagerly (same as `if_eq`).
+
+### 16.4 Result helpers
+
+```
+require : (Flag, Text) -> Result<Unit, Text>
+assume  : (Result<T, E>) -> T
+```
+
+`require(cond, msg) = if cond then Ok(Unit) else Err(msg)`. Designed for
+validation chains.
+
+`assume(result)` unwraps the `Ok(value)` payload and raises `fatal(…)` if
+the result is `Err`. Use when the ruleset has already proven the result is
+`Ok` (e.g. a freshly-refilled deck has a top card) — saves the
+`match result { Ok(v) -> …; Err(_) -> fatal(…) }` ceremony.
+
+### 16.5 Cards
+
+The following builtins assume the common playing-card shape
+
+```
+type Suit = Clubs | Diamonds | Hearts | Spades
+type Card = Card { suit: Suit, rank: Num }    -- 2..10, 11=J, 12=Q, 13=K, 14=A
+```
+
+Games that declare an exotic `Card` (e.g. a Tarot deck or tile-based game)
+simply don't call these. Games that use this shape get them for free:
+
+```
+fresh_deck    : () -> List<Card>                         -- the standard 52
+card_rank     : (Card) -> Num
+card_suit     : (Card) -> Suit
+card_has_rank : (Card, Num) -> Flag
+card_has_suit : (Card, Suit) -> Flag
+cards_of_rank : (List<Card>, Num)  -> List<Card>
+cards_of_suit : (List<Card>, Suit) -> List<Card>
+```
+
+`fresh_deck()` returns the deck in `Clubs × 2..14, Diamonds × 2..14, …`
+order. Call `shuffle_list(rng, fresh_deck())` to get a shuffled deck.
+
+### 16.6 Visibility helper
+
+```
+hand_visibility : (PlayerId) -> ((State, PlayerId) -> Visibility)
+```
+
+The "player's own hand" pattern. `hand_visibility(p)` returns a visibility
+function that yields `SeeAll` when the viewer equals `p`, `SeeSize`
+otherwise. Replaces the lambda
+
+```game
+fn (state, viewer) -> if_eq(owner, viewer, SeeAll, SeeSize)
+```
+
+in a pile declaration:
+
+```game
+pile Hand(owner: PlayerId) of Card visibility = hand_visibility(owner)
+```
+
+### 16.7 Dealing helpers
+
+```
+deal_evenly : (State, List<PlayerId>, List<C>, per: Num,
+               pile_of: (PlayerId) -> PileRef<C>)
+            -> State
+
+deal_cycle  : (State, List<PlayerId>, List<C>,
+               pile_of: (PlayerId) -> PileRef<C>)
+            -> State
+```
+
+Both take a parameterized pile constructor and a card list:
+
+- `deal_evenly(s, players, cards, 7, Hand)` deals chunks of 7 to each
+  player in seat order. If `cards` runs out, the remaining players get
+  empty hands.
+- `deal_cycle(s, players, cards, Hand)` deals one card at a time cycling
+  through `players`, producing round-robin uneven hands when
+  `length(cards)` is not a multiple of `length(players)`.
+
+Both are `setup`- and `apply`-callable. Stacking onto a pile that already
+has cards appends (per `init_pile`'s semantics).
+
+### 16.8 Deck refill
+
+```
+refill : (State, RNG, deck: PileRef<C>, source: PileRef<C>, keep_top: Flag)
+       -> State
+```
+
+Shuffles `source` into `deck`. If `keep_top = On`, the topmost card of
+`source` stays in place (the Crazy Eights pattern where the top of the
+discard remains the play reference after refill). No-op when `source`
+is empty (or has only the preserved top).
+
+## 17. Availability summary
 
 The matrix below covers only gameplay functions. The text I/O functions (`action_to_text`, `text_to_action`, `view_to_text`, `outcome_to_text`) are each their own callsite with access only to the stdlib functions that match their inputs:
 

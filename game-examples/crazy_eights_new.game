@@ -1,0 +1,210 @@
+-- ============================================================
+-- Crazy Eights — `_new` version (v0.1 stdlib).
+-- Rules identical to crazy_eights.game; fresh_deck, refill,
+-- hand_visibility, require trim ~100 lines of scaffolding.
+-- ============================================================
+
+type Suit = Clubs | Diamonds | Hearts | Spades
+type Card = Card { suit: Suit, rank: Num }
+
+type Phase = ShouldPlay | JustDrawnPh
+
+type Action =
+  | Play       { card: Card }
+  | Play8      { card: Card, suit: Suit }
+  | Draw
+  | Keep
+  | PlayDrawn
+  | PlayDrawn8 { suit: Suit }
+
+type Outcome = Finished { order: List<PlayerId> }
+type Config  = Config { turn: PlayerId, phase: Phase,
+                         active_suit: Suit, finished: List<PlayerId> }
+type PlayerDict = PlayerDict {}
+
+pile Hand(owner: PlayerId)      of Card visibility = hand_visibility(owner)
+pile JustDrawn(owner: PlayerId) of Card visibility = hand_visibility(owner)
+pile Deck    of Card visibility = public_size
+pile Discard of Card visibility = public
+
+fn is_eight(c: Card) -> Flag = card_has_rank(c, 8)
+
+fn matches(card: Card, active_suit: Suit, top: Card) -> Flag =
+  flag_or(card_has_suit(card, active_suit),
+          eq_num(card_rank(card), card_rank(top)))
+
+fn set_phase(state: State, ph: Phase) -> State =
+  with_config(state, Config { ..config_of(state), phase: ph })
+
+fn set_suit(state: State, s: Suit) -> State =
+  with_config(state, Config { ..config_of(state), active_suit: s })
+
+fn add_finished(state: State, p: PlayerId) -> State =
+  match config_of(state) { Config { finished, .. } ->
+    with_config(state, Config { ..config_of(state),
+      finished: append(finished, [p]) })
+  }
+
+fn next_active(players: List<PlayerId>, current: PlayerId,
+               finished: List<PlayerId>) -> PlayerId =
+  let nxt = next_in_cycle(players, current) in
+  match member(finished, nxt) { Off -> nxt; On -> next_active(players, nxt, finished) }
+
+fn advance_turn(state: State) -> State =
+  match config_of(state) { Config { turn, finished, .. } ->
+    with_config(state, Config { ..config_of(state),
+      turn: next_active(players_of(state), turn, finished),
+      phase: ShouldPlay })
+  }
+
+fn setup(players: List<PlayerId>, options: Options, rng: RNG)
+  -> Result<State, Text> =
+  let n = length(players) in
+  and_then(require(between(2, n, 7), "Crazy Eights requires 2-7 players"), fn (_u) ->
+    let per = when_flag(eq_num(n, 2), 7, 5) in
+    let (dealt, rest) = split_at(shuffle_list(rng, fresh_deck()), n * per) in
+    match players { [first, ..] ->
+      let cfg = Config { turn: first, phase: ShouldPlay,
+                         active_suit: Clubs, finished: [] } in
+      let s0 = new_state(cfg) in
+      let s1 = deal_evenly(s0, players, dealt, per, Hand) in
+      let s2 = init_pile(s1, Deck, rest) in
+      let s3 = place_initial_discard(s2) in
+      Ok(set_suit(s3, card_suit(top_or_fatal(s3, Discard))));
+      [] -> fatal("validated above")
+    })
+
+fn top_or_fatal(state: State, pile: PileRef<Card>) -> Card =
+  match top_of(state, pile) { Ok(c) -> c; Err(_) -> fatal("top empty") }
+
+-- Flip top of deck; if it's an 8 recurse to bury it.
+fn place_initial_discard(state: State) -> State =
+  let s1 = move_top(state, from=Deck, to=Discard) in
+  match is_eight(top_or_fatal(s1, Discard)) {
+    Off -> s1;  On  -> place_initial_discard(s1)
+  }
+
+fn validate(view: View, player: PlayerId, action: Action)
+  -> Result<Unit, Text> =
+  match view_config(view) { Config { turn, phase, active_suit, .. } ->
+    and_then(require(eq(player, turn), "It is not your turn"), fn (_u) ->
+      let top = match view_of(view, Discard) {
+        Contents([t, ..]) -> t;  _ -> fatal("discard visible")
+      } in
+      match action {
+        Play { card }         -> v_play(view, player, phase, active_suit, top, card);
+        Play8 { card, .. }    -> v_play8(view, player, phase, card);
+        Draw                  -> v_draw(view, phase);
+        Keep                  -> match phase { JustDrawnPh -> Ok(Unit);
+                                                ShouldPlay  -> Err("nothing to keep") };
+        PlayDrawn             -> v_play_drawn(view, player, phase, active_suit, top);
+        PlayDrawn8 { .. }     -> v_play_drawn8(view, player, phase)
+      })
+  }
+
+fn v_play(view: View, player: PlayerId, phase: Phase, active_suit: Suit,
+           top: Card, card: Card) -> Result<Unit, Text> =
+  match phase {
+    JustDrawnPh -> Err("Already drew; play drawn or Keep");
+    ShouldPlay ->
+      and_then(require(flag_not(is_eight(card)),
+                       "That is an 8; use Play8"), fn (_u) ->
+      and_then(hand_holds(view, player, card), fn (_u) ->
+        require(matches(card, active_suit, top),
+                "That card doesn't match the active suit or top rank")))
+  }
+
+fn hand_holds(view: View, player: PlayerId, card: Card) -> Result<Unit, Text> =
+  match view_of(view, Hand(player)) {
+    Contents(cs) -> require(member(cs, card), "You do not hold that card");
+    _ -> fatal("own hand should be visible")
+  }
+
+fn v_play8(view: View, player: PlayerId, phase: Phase, card: Card)
+  -> Result<Unit, Text> =
+  match phase {
+    JustDrawnPh -> Err("Already drew; play drawn or Keep");
+    ShouldPlay ->
+      and_then(require(is_eight(card), "That card is not an 8"), fn (_u) ->
+        hand_holds(view, player, card))
+  }
+
+fn v_draw(view: View, phase: Phase) -> Result<Unit, Text> =
+  match phase {
+    JustDrawnPh -> Err("You already drew this turn");
+    ShouldPlay -> match visible_size_of(view, Deck) {
+      Err(_) -> fatal("deck size visible");
+      Ok(n) -> match is_positive(n) {
+        On -> Ok(Unit);
+        Off -> match view_of(view, Discard) {
+          Contents(cs) -> require(gte(length(cs), 2),
+                                   "Deadlock: deck empty and discard has no refill");
+          _ -> fatal("discard public")
+        }
+      }
+    }
+  }
+
+fn v_play_drawn(view: View, player: PlayerId, phase: Phase,
+                 active_suit: Suit, top: Card) -> Result<Unit, Text> =
+  match phase {
+    ShouldPlay -> Err("Nothing drawn yet");
+    JustDrawnPh -> match view_of(view, JustDrawn(player)) {
+      Contents([c]) ->
+        and_then(require(flag_not(is_eight(c)),
+                         "Drawn card is an 8; use PlayDrawn8"), fn (_u) ->
+          require(matches(c, active_suit, top),
+                  "Drawn card doesn't match; you must Keep"));
+      _ -> fatal("JustDrawn should have 1 card")
+    }
+  }
+
+fn v_play_drawn8(view: View, player: PlayerId, phase: Phase)
+  -> Result<Unit, Text> =
+  match phase {
+    ShouldPlay -> Err("Nothing drawn yet");
+    JustDrawnPh -> match view_of(view, JustDrawn(player)) {
+      Contents([c]) -> require(is_eight(c), "Drawn card is not an 8");
+      _ -> fatal("JustDrawn should have 1 card")
+    }
+  }
+
+fn apply(state: State, rng: RNG, action: Action, player: PlayerId) -> State =
+  match action {
+    Play { card }         -> do_play(state, Hand(player), card, card_suit(card), player);
+    Play8 { card, suit }  -> do_play(state, Hand(player), card, suit, player);
+    Draw                  -> apply_draw(state, rng, player);
+    Keep                  -> advance_turn(move_top(state,
+                                         from=JustDrawn(player), to=Hand(player)));
+    PlayDrawn             -> apply_pd(state, player, fn (c) -> card_suit(c));
+    PlayDrawn8 { suit }   -> apply_pd(state, player, fn (_c) -> suit)
+  }
+
+fn do_play(state: State, from: PileRef<Card>, card: Card, new_suit: Suit,
+           player: PlayerId) -> State =
+  let s1 = set_suit(move_card(state, from=from, to=Discard, card=card), new_suit) in
+  let s2 = when_flag(is_empty(cards_in(s1, Hand(player))),
+                      add_finished(s1, player), s1) in
+  advance_turn(s2)
+
+fn apply_draw(state: State, rng: RNG, player: PlayerId) -> State =
+  let s1 = refill(state, rng, Deck, Discard, On) in
+  set_phase(move_top(s1, from=Deck, to=JustDrawn(player)), JustDrawnPh)
+
+fn apply_pd(state: State, player: PlayerId, pick_suit: (Card) -> Suit) -> State =
+  match top_of(state, JustDrawn(player)) {
+    Err(_) -> fatal("JustDrawn should have a card");
+    Ok(c)  -> do_play(state, JustDrawn(player), c, pick_suit(c), player)
+  }
+
+fn terminal(state: State) -> GameStatus<Outcome> =
+  match config_of(state) { Config { finished, .. } ->
+    let total = length(players_of(state)) in
+    match eq_num(length(finished), total - 1) {
+      Off -> Ongoing;
+      On  -> match find(players_of(state), fn (p) -> flag_not(member(finished, p))) {
+        Ok(last) -> Ended(Finished { order: append(finished, [last]) });
+        Err(_)   -> fatal("terminal: one player must be unfinished")
+      }
+    }
+  }

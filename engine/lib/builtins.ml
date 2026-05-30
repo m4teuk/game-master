@@ -178,5 +178,96 @@ let seed_values env =
     (* §15 PlayerId conversion *)
     |> add_fn "player_id_to_text" [("player", Types.T_player_id)] Types.T_text
     |> add_fn "text_to_player_id" [("text", Types.T_text); ("view", Types.T_view)] (result Types.T_player_id Types.T_text)
+
+    (* ============================================================ *)
+    (* §16 Extended stdlib — non-breaking additions (see stdlib.md)  *)
+    (* ============================================================ *)
+
+    (* §16.1 List ops *)
+    |> add_fn "range"    [("lo", Types.T_num); ("hi", Types.T_num)] (list Types.T_num)
+    |> add_fn "take"     [("list", list (v 0)); ("n", Types.T_num)] (list (v 0))
+    |> add_fn "drop"     [("list", list (v 0)); ("n", Types.T_num)] (list (v 0))
+    |> add_fn "count"    [("list", list (v 0)); ("f", fn [v 0] (user "Flag"))] Types.T_num
+    |> add_fn "find"     [("list", list (v 0)); ("f", fn [v 0] (user "Flag"))]
+                         (result (v 0) Types.T_text)
+    |> add_fn "concat"   [("list", list (list (v 0)))] (list (v 0))
+    |> add_fn "reverse"  [("list", list (v 0))] (list (v 0))
+    |> add_fn "repeat"   [("n", Types.T_num); ("item", v 0)] (list (v 0))
+    |> add_fn "zip"      [("xs", list (v 0)); ("ys", list (v 1))]
+                         (list (tuple [v 0; v 1]))
+    |> add_fn "sum"      [("list", list Types.T_num)] Types.T_num
+    |> add_fn "is_empty" [("list", list (v 0))] (user "Flag")
+    |> add_fn "head"     [("list", list (v 0))] (result (v 0) Types.T_text)
+    |> add_fn "tail"     [("list", list (v 0))] (result (list (v 0)) Types.T_text)
+
+    (* §16.2 Numeric predicates and helpers *)
+    |> add_fn "gt"      [("a", Types.T_num); ("b", Types.T_num)] (user "Flag")
+    |> add_fn "lt"      [("a", Types.T_num); ("b", Types.T_num)] (user "Flag")
+    |> add_fn "gte"     [("a", Types.T_num); ("b", Types.T_num)] (user "Flag")
+    |> add_fn "lte"     [("a", Types.T_num); ("b", Types.T_num)] (user "Flag")
+    |> add_fn "eq_num"  [("a", Types.T_num); ("b", Types.T_num)] (user "Flag")
+    |> add_fn "ne_num"  [("a", Types.T_num); ("b", Types.T_num)] (user "Flag")
+    |> add_fn "between" [("lo", Types.T_num); ("x", Types.T_num); ("hi", Types.T_num)]
+                        (user "Flag")
+    |> add_fn "min"     [("a", Types.T_num); ("b", Types.T_num)] Types.T_num
+    |> add_fn "max"     [("a", Types.T_num); ("b", Types.T_num)] Types.T_num
+    |> add_fn "is_zero"     [("n", Types.T_num)] (user "Flag")
+    |> add_fn "is_positive" [("n", Types.T_num)] (user "Flag")
+    |> add_fn "is_negative" [("n", Types.T_num)] (user "Flag")
+
+    (* §16.3 Flag combinators *)
+    |> add_fn "flag_and"  [("a", user "Flag"); ("b", user "Flag")] (user "Flag")
+    |> add_fn "flag_or"   [("a", user "Flag"); ("b", user "Flag")] (user "Flag")
+    |> add_fn "flag_not"  [("a", user "Flag")] (user "Flag")
+    |> add_fn "when_flag" [("cond", user "Flag"); ("then_", v 0); ("else_", v 0)] (v 0)
+
+    (* §16.4 Result helpers *)
+    |> add_fn "require" [("cond", user "Flag"); ("msg", Types.T_text)]
+                        (result Types.T_unit Types.T_text)
+    (* Unwrap a Result, fatal on Err. Useful when the ruleset has already
+       proven the Result is Ok (e.g. just-refilled deck) and wants to
+       skip the nested-match ceremony. *)
+    |> add_fn "assume"  [("result", result (v 0) (v 1))] (v 0)
+
+    (* §16.5 Cards. These all assume the common shape
+         type Suit = Clubs | Diamonds | Hearts | Spades
+         type Card = Card { suit: Suit, rank: Num }
+       Games that declare an exotic Card simply don't call these. *)
+    |> add_fn "fresh_deck"    [] (list (user "Card"))
+    |> add_fn "card_rank"     [("card", user "Card")] Types.T_num
+    |> add_fn "card_suit"     [("card", user "Card")] (user "Suit")
+    |> add_fn "card_has_rank" [("card", user "Card"); ("rank", Types.T_num)] (user "Flag")
+    |> add_fn "card_has_suit" [("card", user "Card"); ("suit", user "Suit")] (user "Flag")
+    |> add_fn "cards_of_rank" [("cards", list (user "Card")); ("rank", Types.T_num)]
+                              (list (user "Card"))
+    |> add_fn "cards_of_suit" [("cards", list (user "Card")); ("suit", user "Suit")]
+                              (list (user "Card"))
+
+    (* §16.6 Visibility helper: SeeAll to owner, SeeSize to everyone else. *)
+    |> add_fn "hand_visibility" [("owner", Types.T_player_id)]
+                                (fn [Types.T_state; Types.T_player_id] (user "Visibility"))
+
+    (* §16.7 Dealing helpers. `pile_of` is typically a parameterized pile
+       constructor like `Hand`: the stdlib calls `pile_of(player)` for each
+       player and deposits cards into the resulting PileRef<C>. *)
+    |> add_fn "deal_evenly"
+         [("state", Types.T_state); ("players", list Types.T_player_id);
+          ("cards", list (v 0)); ("per", Types.T_num);
+          ("pile_of", fn [Types.T_player_id] (pile_ref (v 0)))]
+         Types.T_state
+    |> add_fn "deal_cycle"
+         [("state", Types.T_state); ("players", list Types.T_player_id);
+          ("cards", list (v 0));
+          ("pile_of", fn [Types.T_player_id] (pile_ref (v 0)))]
+         Types.T_state
+
+    (* §16.8 Deck refill: move `source` into `deck` and shuffle the deck.
+       When `keep_top = On`, the top card of `source` stays put (the
+       "Crazy Eights" pattern of preserving the discard top). *)
+    |> add_fn "refill"
+         [("state", Types.T_state); ("rng", Types.T_rng);
+          ("deck", pile_ref (v 0)); ("source", pile_ref (v 0));
+          ("keep_top", user "Flag")]
+         Types.T_state
   in
   env

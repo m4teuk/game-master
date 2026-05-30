@@ -1,0 +1,107 @@
+-- ============================================================
+-- War — `_new` version (v0.1 stdlib).
+-- Rules identical to war.game; fresh_deck + hand_visibility + refill
+-- trim away the deck boilerplate and the shuffled-refill dance.
+-- ============================================================
+
+type Suit = Clubs | Diamonds | Hearts | Spades
+type Card = Card { suit: Suit, rank: Num }
+
+type Action  = Play | Take
+type Outcome = Winner { player: PlayerId } | Draw
+type Config  = Config { p1: PlayerId, p2: PlayerId }
+type PlayerDict = PlayerDict {}
+
+pile Deck(owner: PlayerId)    of Card visibility = public_size
+pile Played(owner: PlayerId)  of Card visibility = hand_visibility(owner)
+pile Active(owner: PlayerId)  of Card visibility = public
+
+fn setup(players: List<PlayerId>, options: Options, rng: RNG)
+  -> Result<State, Text> =
+  match players {
+    [p1, p2] ->
+      let (h1, h2) = split_at(shuffle_list(rng, fresh_deck()), 26) in
+      let s0 = init_pile(new_state(Config { p1: p1, p2: p2 }), Deck(p1), h1) in
+      Ok(init_pile(s0, Deck(p2), h2));
+    _ -> Err("War requires exactly 2 players")
+  }
+
+fn active_top(view: View, who: PlayerId) -> Result<Card, Text> =
+  visible_top_of(view, Active(who))
+
+fn validate(view: View, player: PlayerId, action: Action)
+  -> Result<Unit, Text> =
+  match view_config(view) { Config { p1, p2 } ->
+    match action {
+      Play ->
+        and_then(match view_of(view, Played(player)) {
+                   Contents([]) -> Ok(Unit);
+                   Contents(_)  -> Err("You have already played this round");
+                   _            -> fatal("played pile should be visible")
+                 }, fn (_u) ->
+        and_then(require(is_positive(size_of_view(view, Deck(player))),
+                         "Your deck is empty"), fn (_u) ->
+          match (active_top(view, p1), active_top(view, p2)) {
+            (Ok(c1), Ok(c2)) ->
+              require(eq_num(card_rank(c1), card_rank(c2)),
+                      "Active has a winner; take it first");
+            _ -> Ok(Unit)
+          }));
+      Take ->
+        match (active_top(view, p1), active_top(view, p2)) {
+          (Ok(c1), Ok(c2)) ->
+            let r1 = card_rank(c1) in let r2 = card_rank(c2) in
+            and_then(require(ne_num(r1, r2),
+                             "Active is at a draw; play another card"), fn (_u) ->
+              require(eq(player, when_flag(gt(r1, r2), p1, p2)),
+                      "Only the winner may take"));
+          _ -> Err("Both active piles must be non-empty to take")
+        }
+    }
+  }
+
+-- Convenience: deck size via a view. visible_size_of returns Result.
+fn size_of_view(view: View, pile: PileRef<Card>) -> Num =
+  match visible_size_of(view, pile) {
+    Ok(n)  -> n;
+    Err(_) -> fatal("own deck size should be visible")
+  }
+
+fn apply(state: State, rng: RNG, action: Action, player: PlayerId) -> State =
+  match config_of(state) { Config { p1, p2 } ->
+    match action {
+      Play ->
+        let s1 = move_top(state, from=Deck(player), to=Played(player)) in
+        when_flag(flag_and(is_positive(size_of(s1, Played(p1))),
+                           is_positive(size_of(s1, Played(p2)))),
+          move_top(move_top(s1, from=Played(p1), to=Active(p1)),
+                   from=Played(p2), to=Active(p2)),
+          s1);
+      Take ->
+        let temp = temp_pile() in
+        let s1 = move_all(state, from=Active(p1), to=temp) in
+        let s2 = move_all(s1,    from=Active(p2), to=temp) in
+        move_all_to_bottom(shuffle(s2, rng, temp), from=temp, to=Deck(player))
+    }
+  }
+
+fn terminal(state: State) -> GameStatus<Outcome> =
+  match config_of(state) { Config { p1, p2 } ->
+    match (settled(state, p1, p2), out(state, p1), out(state, p2)) {
+      (On, On, On)   -> Ended(Draw);
+      (On, On, Off)  -> Ended(Winner { player: p2 });
+      (On, Off, On)  -> Ended(Winner { player: p1 });
+      _              -> Ongoing
+    }
+  }
+
+fn out(state: State, p: PlayerId) -> Flag =
+  flag_and(is_zero(size_of(state, Deck(p))),
+           is_zero(size_of(state, Played(p))))
+
+fn settled(state: State, p1: PlayerId, p2: PlayerId) -> Flag =
+  match (cards_in(state, Active(p1)), cards_in(state, Active(p2))) {
+    ([], []) -> On;
+    ([c1, ..], [c2, ..]) -> eq_num(card_rank(c1), card_rank(c2));
+    _ -> Off
+  }

@@ -119,15 +119,24 @@ let required_fn_signatures : (string * Types.ty) list = [
     Types.T_text);
 ]
 
+(* The four text-I/O functions are optional: if the ruleset omits them,
+   [link] synthesizes a one-liner that delegates to the matching
+   [builtin_*_to_*]. User code that declares them explicitly still has
+   its signature audited. *)
+let text_io_fn_names =
+  ["action_to_text"; "text_to_action"; "view_to_text"; "outcome_to_text"]
+
 let audit_fns (tfile : Typecheck.tfile) : Load_error.t list =
   let top_fns = Typecheck.top_fns tfile in
   List.filter_map (fun (name, expected) ->
     match List.assoc_opt name top_fns with
     | None ->
-      Some (link_err
-              (Printf.sprintf
-                 "missing required function '%s : %s' (type-system §3.3)"
-                 name (Types.string_of_ty expected)))
+      if List.mem name text_io_fn_names then None   (* will default below *)
+      else
+        Some (link_err
+                (Printf.sprintf
+                   "missing required function '%s : %s' (type-system §3.3)"
+                   name (Types.string_of_ty expected)))
     | Some (texpr : Typecheck.texpr) ->
       if texpr.ty = expected then None
       else
@@ -139,6 +148,51 @@ let audit_fns (tfile : Typecheck.tfile) : Load_error.t list =
                    (Types.string_of_ty expected)
                    (Types.string_of_ty texpr.ty))))
     required_fn_signatures
+
+(* Build a synthesized [TE_lambda] whose body is a single call to
+   [builtin_name] applied to the lambda's parameters in order. Used by
+   [default_text_io_fn] to stand in for a missing user-declared
+   [action_to_text] / [text_to_action] / [view_to_text] / [outcome_to_text]. *)
+let synthesize_delegating_fn
+    ~(builtin_name : string)
+    ~(params : (string * Types.ty) list)
+    ~(ret_ty : Types.ty)
+  : Typecheck.texpr =
+  let sp = Load_error.no_span in
+  let mk node ty = { Tc_ast.node; ty; span = sp } in
+  let body_args =
+    List.map (fun (n, t) -> mk (Tc_ast.TE_var n) t) params
+  in
+  let fn_ty = Types.T_fn (List.map snd params, ret_ty) in
+  let body =
+    mk (Tc_ast.TE_app (mk (Tc_ast.TE_var builtin_name) fn_ty, body_args))
+       ret_ty
+  in
+  mk (Tc_ast.TE_lambda { params; body }) fn_ty
+
+let default_text_io_fn (name : string) : Typecheck.texpr =
+  match name with
+  | "action_to_text" ->
+    synthesize_delegating_fn
+      ~builtin_name:"builtin_action_to_text"
+      ~params:[("a", Types.T_user "Action"); ("p", Types.T_player_id)]
+      ~ret_ty:Types.T_text
+  | "text_to_action" ->
+    synthesize_delegating_fn
+      ~builtin_name:"builtin_text_to_action"
+      ~params:[("t", Types.T_text); ("v", Types.T_view); ("p", Types.T_player_id)]
+      ~ret_ty:(Types.T_result (Types.T_user "Action", Types.T_text))
+  | "view_to_text" ->
+    synthesize_delegating_fn
+      ~builtin_name:"builtin_view_to_text"
+      ~params:[("v", Types.T_view); ("p", Types.T_player_id)]
+      ~ret_ty:Types.T_text
+  | "outcome_to_text" ->
+    synthesize_delegating_fn
+      ~builtin_name:"builtin_outcome_to_text"
+      ~params:[("o", Types.T_user "Outcome"); ("p", Types.T_player_id)]
+      ~ret_ty:Types.T_text
+  | _ -> raise (Failure "default_text_io_fn: unknown name")
 
 (* ---------------------------------------------------------------- *)
 (* Bundling                                                           *)
@@ -155,7 +209,14 @@ let link (tfile : Typecheck.tfile) (env : Types.env)
   let errs = audit_types env @ audit_fns tfile in
   if errs <> [] then Error errs
   else
-    let fn name = List.assoc name (Typecheck.top_fns tfile) in
+    let top = Typecheck.top_fns tfile in
+    let fn name = List.assoc name top in
+    (* A text-I/O fn that wasn't declared falls back to the builtin. *)
+    let fn_or_default_text_io name =
+      match List.assoc_opt name top with
+      | Some t -> t
+      | None -> default_text_io_fn name
+    in
     Ok {
       tfile;
       env;
@@ -168,10 +229,10 @@ let link (tfile : Typecheck.tfile) (env : Types.env)
       validate = fn "validate";
       apply = fn "apply";
       terminal = fn "terminal";
-      action_to_text = fn "action_to_text";
-      text_to_action = fn "text_to_action";
-      view_to_text = fn "view_to_text";
-      outcome_to_text = fn "outcome_to_text";
+      action_to_text  = fn_or_default_text_io "action_to_text";
+      text_to_action  = fn_or_default_text_io "text_to_action";
+      view_to_text    = fn_or_default_text_io "view_to_text";
+      outcome_to_text = fn_or_default_text_io "outcome_to_text";
       pile_decls = List.map pile_info_of (Typecheck.pile_decls tfile);
       options_schema = List.map options_field_of (Typecheck.options_decl tfile);
     }

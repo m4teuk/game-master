@@ -66,6 +66,13 @@ and texpr_node = Tc_ast.texpr_node =
       body : texpr;
     }
   | TE_bin of Ast.bin_op * texpr * texpr
+  | TE_rel of Ast.rel_op * texpr * texpr
+    (** Relational operator on [Num]s: [a < b], [a == b], etc. Result
+        is a [Flag]. *)
+  | TE_if of { cond : texpr; then_ : texpr; else_ : texpr }
+    (** [if cond then a else b]. [cond] has type [Flag]; [a] and [b]
+        have the same type (the result). Evaluation is lazy — only the
+        taken branch is evaluated. *)
   | TE_neg of texpr
 
 and tpattern = Tc_ast.tpattern = {

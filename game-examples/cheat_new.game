@@ -1,0 +1,121 @@
+-- ============================================================
+-- Cheat / BS — `_new` version (v0.1 stdlib).
+-- Rules identical to cheat.game; fresh_deck + deal_cycle +
+-- hand_visibility + require shed most of the scaffolding.
+-- ============================================================
+
+type Suit = Clubs | Diamonds | Hearts | Spades
+type Card = Card { suit: Suit, rank: Num }
+
+type Phase =
+  | Claim
+  | Challenge { claimer: PlayerId }
+
+type Action =
+  | Play { cards: List<Card> }
+  | Call
+  | Pass
+
+type Outcome = Winner { player: PlayerId }
+type Config  = Config { turn: PlayerId, phase: Phase,
+                         claim_rank: Num, max_play: Num }
+type PlayerDict = PlayerDict {}
+
+pile Hand(owner: PlayerId) of Card visibility = hand_visibility(owner)
+pile LastPlay of Card visibility = public_size
+pile Burned   of Card visibility = public_size
+
+options { max_play: Num = 4, start_rank: Num = 2 }
+
+fn next_rank(r: Num) -> Num = when_flag(eq_num(r, 14), 2, r + 1)
+
+fn setup(players: List<PlayerId>, options: Options, rng: RNG)
+  -> Result<State, Text> =
+  match options { Options { max_play, start_rank } ->
+    and_then(require(between(3, length(players), 6),
+                     "Cheat requires 3-6 players"), fn (_u) ->
+    and_then(require(gte(max_play, 1), "max_play must be at least 1"), fn (_u) ->
+    and_then(require(between(2, start_rank, 14),
+                     "start_rank must be in 2..14"), fn (_u) ->
+      match players { [first, ..] ->
+        let cfg = Config { turn: first, phase: Claim,
+                           claim_rank: start_rank, max_play: max_play } in
+        Ok(deal_cycle(new_state(cfg), players,
+                      shuffle_list(rng, fresh_deck()), Hand));
+        [] -> fatal("validated above")
+      })))
+  }
+
+fn no_dups(cards: List<Card>) -> Flag =
+  match cards {
+    [] -> On;
+    [c, ..rest] -> match member(rest, c) {
+      On -> Off;  Off -> no_dups(rest)
+    }
+  }
+
+fn validate(view: View, player: PlayerId, action: Action)
+  -> Result<Unit, Text> =
+  match view_config(view) { Config { turn, phase, max_play, .. } ->
+    and_then(require(eq(player, turn), "It is not your turn"), fn (_u) ->
+      match (phase, action) {
+        (Claim, Play { cards }) -> validate_play(view, player, cards, max_play);
+        (Claim, _)               -> Err("You must Play cards now");
+        (Challenge { .. }, Call) -> Ok(Unit);
+        (Challenge { .. }, Pass) -> Ok(Unit);
+        (Challenge { .. }, _)    -> Err("You must Call or Pass now")
+      })
+  }
+
+fn validate_play(view: View, player: PlayerId, cards: List<Card>,
+                 max_play: Num) -> Result<Unit, Text> =
+  and_then(require(between(1, length(cards), max_play),
+                   "Play 1..max_play cards"), fn (_u) ->
+  and_then(require(no_dups(cards), "You can't play the same card twice"), fn (_u) ->
+    match view_of(view, Hand(player)) {
+      Contents(hand) -> require(all(cards, fn (c) -> member(hand, c)),
+                                 "You do not hold all of those cards");
+      _ -> fatal("own hand should be visible")
+    }))
+
+fn apply(state: State, rng: RNG, action: Action, player: PlayerId) -> State =
+  let cfg = config_of(state) in
+  match cfg { Config { phase, claim_rank, .. } ->
+    match action {
+      Play { cards } ->
+        let s1 = fold(cards, state, fn (s, c) ->
+          move_card(s, from=Hand(player), to=LastPlay, card=c)) in
+        with_config(s1, Config { ..cfg,
+          turn: next_in_cycle(players_of(state), player),
+          phase: Challenge { claimer: player } });
+      Call ->
+        match phase {
+          Claim -> fatal("Call only valid in Challenge phase");
+          Challenge { claimer } ->
+            let honest = all(cards_in(state, LastPlay),
+                             fn (c) -> card_has_rank(c, claim_rank)) in
+            let loser = when_flag(honest, player, claimer) in
+            let s1 = move_all(state, from=LastPlay, to=Hand(loser)) in
+            let s2 = move_all(s1,    from=Burned,   to=Hand(loser)) in
+            with_config(s2, Config { ..cfg, turn: loser,
+              phase: Claim, claim_rank: next_rank(claim_rank) })
+        };
+      Pass ->
+        let s1 = move_all(state, from=LastPlay, to=Burned) in
+        with_config(s1, Config { ..cfg,
+          turn: next_in_cycle(players_of(state), player),
+          phase: Claim, claim_rank: next_rank(claim_rank) })
+    }
+  }
+
+fn terminal(state: State) -> GameStatus<Outcome> =
+  match config_of(state) { Config { phase, .. } ->
+    match phase {
+      Challenge { .. } -> Ongoing;
+      Claim -> match find(players_of(state), fn (p) ->
+                  is_zero(size_of(state, Hand(p)))) {
+        Ok(w)  -> Ended(Winner { player: w });
+        Err(_) -> Ongoing
+      }
+    }
+  }
