@@ -77,10 +77,6 @@ let bin_op_str = function
   | Ast.Add -> "+" | Ast.Sub -> "-" | Ast.Mul -> "*"
   | Ast.Div -> "/" | Ast.Mod -> "mod"
 
-let rel_op_str = function
-  | Ast.RLt -> "<" | Ast.RLte -> "<=" | Ast.RGt -> ">" | Ast.RGte -> ">="
-  | Ast.REq -> "==" | Ast.RNeq -> "!="
-
 let rec pp_expr fmt (e : Ast.expr) =
   match e with
   | Ast.E_num (n, _) -> Format.fprintf fmt "%d" n
@@ -117,11 +113,6 @@ let rec pp_expr fmt (e : Ast.expr) =
       (pp_comma_list pp_param) params pp_expr body
   | Ast.E_bin (op, l, r, _) ->
     Format.fprintf fmt "(%a %s %a)" pp_expr l (bin_op_str op) pp_expr r
-  | Ast.E_rel (op, l, r, _) ->
-    Format.fprintf fmt "(%a %s %a)" pp_expr l (rel_op_str op) pp_expr r
-  | Ast.E_if { cond; then_; else_; _ } ->
-    Format.fprintf fmt "(if %a then %a else %a)"
-      pp_expr cond pp_expr then_ pp_expr else_
   | Ast.E_neg (e, _) ->
     Format.fprintf fmt "-%a" pp_expr e
 
@@ -244,11 +235,6 @@ let rec pp_texpr fmt (te : Tc_ast.texpr) =
         pp_texpr body
     | TE_bin (op, l, r) ->
       Format.fprintf fmt "(%a %s %a)" pp_texpr l (bin_op_str op) pp_texpr r
-    | TE_rel (op, l, r) ->
-      Format.fprintf fmt "(%a %s %a)" pp_texpr l (rel_op_str op) pp_texpr r
-    | TE_if { cond; then_; else_ } ->
-      Format.fprintf fmt "(if %a then %a else %a)"
-        pp_texpr cond pp_texpr then_ pp_texpr else_
     | TE_neg e -> Format.fprintf fmt "-%a" pp_texpr e
   in
   Format.fprintf fmt "(%a : %s)" pp_inner te.node (Types.string_of_ty te.ty)

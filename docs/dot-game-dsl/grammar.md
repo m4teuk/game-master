@@ -32,7 +32,7 @@ There is no block-comment syntax in v0.
 The following identifiers are reserved and cannot be used as user-defined names:
 
 ```
-fn  let  in  match  type  pile  of  visibility  mod  if  then  else
+fn  let  in  match  type  pile  of  visibility  mod
 ```
 
 **Soft keywords.** The word `options` introduces an `options_decl` (§2.4) but is not reserved. It is lexed as a `VALUE_IDENT` and recognized by the parser only at top level when immediately followed by `{`. Elsewhere — including parameter names, like `fn setup(..., options: Options, ...)` — it behaves like any other identifier.
@@ -68,7 +68,6 @@ No other escapes, no interpolation, no multi-line text literals. A literal newli
 ,  :  ;  =
 ->  |  ..  <  >
 +  -  *  /
-==  !=  <=  >=  &&  ||
 ```
 
 `mod` is the one word-shaped infix operator (it is a keyword, §1.4).
@@ -217,26 +216,14 @@ Patterns may nest to any depth. Exhaustiveness is checked by the type system (se
 
 Precedence levels, from loosest to tightest:
 
-1. **Spine forms** (`let`, `match`, `fn`, `if-then-else`): extend rightward as far as possible.
-2. **Logical or**: `||` — left-associative, desugars to `flag_or(l, r)`.
-3. **Logical and**: `&&` — left-associative, desugars to `flag_and(l, r)`.
-4. **Relational**: `<`, `<=`, `>`, `>=`, `==`, `!=` — non-associative (no chaining).
-5. **Additive binary**: `+`, `-`
-6. **Multiplicative binary**: `*`, `/`, `mod`
-7. **Unary**: `-`
-8. **Application**: `f(…)` — left-associative
-9. **Atomic**: literals, identifiers, parenthesized, collection/record literals
+1. **Spine forms** (`let`, `match`, `fn`): extend rightward as far as possible.
+2. **Additive binary**: `+`, `-`
+3. **Multiplicative binary**: `*`, `/`, `mod`
+4. **Unary**: `-`
+5. **Application**: `f(…)` — left-associative
+6. **Atomic**: literals, identifiers, parenthesized, collection/record literals
 
-All binary operators (except relational) are **left-associative**.
-Ordered comparisons (`<`, `<=`, `>`, `>=`) require both operands to be
-`Num`; equality (`==`, `!=`) works on any equality-admissible type
-([type-system §7.1](./type-system.md)). The result of every relational
-operator is a `Flag`.
-
-`if cond then a else b` requires `cond : Flag` and `a`, `b` of the same
-type (the result type). Evaluation is lazy — only the taken branch
-runs, which makes self-recursion safe where `if_eq` / `when_flag` would
-infinite-loop.
+All binary operators are **left-associative**.
 
 ```
 expr = expr_spine
@@ -244,19 +231,12 @@ expr = expr_spine
 expr_spine = expr_let
            | expr_match
            | expr_lambda
-           | expr_if
-           | expr_or
+           | expr_add
 
 expr_let    = "let" pattern "=" expr_spine "in" expr_spine
 expr_match  = "match" expr "{" match_arm (";" match_arm)* ";"? "}"
 match_arm   = pattern "->" expr_spine
 expr_lambda = "fn" "(" params? ")" "->" expr_spine
-expr_if     = "if" expr "then" expr_spine "else" expr_spine
-
-expr_or  = expr_and  ("||" expr_and)*
-expr_and = expr_rel  ("&&" expr_rel)*
-expr_rel = expr_add  ((relop) expr_add)?
-relop    = "<" | "<=" | ">" | ">=" | "==" | "!="
 
 expr_add = expr_add ("+" | "-") expr_mul | expr_mul
 expr_mul = expr_mul ("*" | "/" | "mod") expr_unary | expr_unary

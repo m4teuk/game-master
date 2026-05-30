@@ -40,16 +40,7 @@ let tokenize ~file src =
     | ',' -> emit_incr Token.COMMA
     | ':' -> emit_incr Token.COLON
     | ';' -> emit_incr Token.SEMI
-    | '=' -> if next_eq '=' then (
-        incr_cur ();
-        emit_incr Token.EQEQ
-      ) else
-        emit_incr Token.EQ
-    | '!' -> if next_eq '=' then (
-        incr_cur ();
-        emit_incr Token.NOTEQ
-      ) else
-        raise (Lex_err ("unexpected character '!'", span_from start))
+    | '=' -> emit_incr Token.EQ
 
     | '-' -> if next_eq '>' then (
         incr_cur ();
@@ -66,17 +57,8 @@ let tokenize ~file src =
     | '|' -> if next_eq '>' then (
         incr_cur ();
         emit_incr Token.PIPE_FORWARD
-      ) else if next_eq '|' then (
-        incr_cur ();
-        emit_incr Token.PIPEPIPE
       ) else
         emit_incr Token.PIPE
-
-    | '&' -> if next_eq '&' then (
-        incr_cur ();
-        emit_incr Token.AMPAMP
-      ) else
-        raise (Lex_err ("unexpected character '&'", span_from start))
 
     | '.' -> if next_eq '.' then (
         incr_cur ();
@@ -84,16 +66,8 @@ let tokenize ~file src =
       ) else
         raise (Lex_err ("unexpected character '.'", span_from start))
 
-    | '<' -> if next_eq '=' then (
-        incr_cur ();
-        emit_incr Token.LTEQ
-      ) else
-        emit_incr Token.LT
-    | '>' -> if next_eq '=' then (
-        incr_cur ();
-        emit_incr Token.GTEQ
-      ) else
-        emit_incr Token.GT
+    | '<' -> emit_incr Token.LT
+    | '>' -> emit_incr Token.GT
     | '+' -> emit_incr Token.PLUS
     | '*' -> emit_incr Token.STAR
     | '/' -> emit_incr Token.SLASH
@@ -154,9 +128,6 @@ let tokenize ~file src =
         | "of" -> Token.KW_OF
         | "visibility" -> Token.KW_VISIBILITY
         | "mod" -> Token.KW_MOD
-        | "if" -> Token.KW_IF
-        | "then" -> Token.KW_THEN
-        | "else" -> Token.KW_ELSE
         | _ -> if Char.is_uppercase c then Token.TYPE_IDENT word else Token.VALUE_IDENT word
       in emit_incr tok
 
